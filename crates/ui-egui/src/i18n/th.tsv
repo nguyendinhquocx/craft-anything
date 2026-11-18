@@ -1,5 +1,6 @@
 # th: Thai UI translations. Licensed MIT OR Apache-2.0.
 # UTF-8: English source<TAB>translation. Keep placeholders and escapes intact.
+Default (its own settings)	ค่าเริ่มต้น (การตั้งค่าของตัวเอง)
 OpenCode default	ค่าเริ่มต้นของ OpenCode
 Model default	ค่าเริ่มต้นของโมเดล
 Thinking depth	ระดับการคิด
@@ -304,6 +305,7 @@ Couldn't look through that folder.	เข้าไปดูโฟลเดอร
 Couldn't open it.	เปิดไม่ได้
 Couldn't open the folder.	เปิดโฟลเดอร์ไม่ได้
 Couldn't open {}: {}	เปิด {} ไม่ได้: {}
+Couldn't save your settings.	บันทึกการตั้งค่าไม่ได้
 Couldn't start a worker thread: {e}	เริ่ม worker thread ไม่ได้: {e}
 Couldn't start it.	เริ่มไม่ได้
 Coverage unknown	ไม่ทราบความครอบคลุม
@@ -1366,6 +1368,7 @@ your files there are the app, edited in place	ไฟล์ของคุณท�
 {name} builds what you make; answers come from {brain}.	{name} สร้างสิ่งที่คุณทำ คำตอบมาจาก {brain}
 {name} can't be attached: a message takes pictures up to 20 MB.	แนบ {name} ไม่ได้: ข้อความรับรูปสูงสุด 20 MB
 {name} can't be attached: it isn't a PNG, JPEG, GIF or WebP picture.	แนบ {name} ไม่ได้: ไม่ใช่รูป PNG, JPEG, GIF หรือ WebP
+{name} can't be kept to only reading, so it isn't asked questions. Ask with Claude Code, or with an AI that has an API key.	{name} จำกัดให้อ่านอย่างเดียวไม่ได้ จึงไม่ถูกถามคำถาม ถามด้วย Claude Code หรือ AI ที่มีคีย์ API แทน
 {name} is ready	{name} พร้อมแล้ว
 {name} is ready.	{name} พร้อมแล้ว
 {name} isn't available yet in this build.	{name} ยังใช้ไม่ได้ในบิลด์นี้
@@ -1488,3 +1491,8 @@ Updated to {version}.	อัปเดตเป็น {version} แล้ว
 Use Releases or your package manager to update this installation.	ใช้รุ่นที่เผยแพร่หรือตัวจัดการแพ็กเกจเพื่ออัปเดตการติดตั้งนี้
 You're up to date.	คุณใช้เวอร์ชันล่าสุดแล้ว
 {version} is available.	มี {version} พร้อมใช้งานแล้ว
+Forget a website sign-in	ลืมการลงชื่อเข้าใช้เว็บไซต์
+Sign in to a website	ลงชื่อเข้าใช้เว็บไซต์
+Some shared files could not be hard-linked and were copied instead ({size}).	ไฟล์ที่แชร์บางไฟล์สร้างฮาร์ดลิงก์ไม่ได้ จึงคัดลอกแทน ({size})
+This server lists several chat models. Choose one:	เซิร์ฟเวอร์นี้มีโมเดลแชตหลายตัว เลือกหนึ่งตัว:
+Choose a model	เลือกโมเดล

@@ -69,12 +69,23 @@ fn is_blank_or_comment(line: &str) -> bool {
     t.is_empty() || t.starts_with('#')
 }
 
-/// `key:` with optional comment, possibly quoted. Returns the rest after the colon.
-fn key_line<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+/// `key:` with optional horizontal whitespace before `:`, possibly quoted. Returns the rest after `:`.
+/// Unquoted keys require horizontal whitespace or end-of-line after `:` so plain keys containing
+/// embedded colons (`craft-anything:dev:`) are not mistaken for `craft-anything:`.
+fn key_line<'a>(line: &'a str, name: &str) -> Option<&'a str> {
     let t = line.trim_start();
-    for k in [key.to_string(), format!("\"{key}\""), format!("'{key}'")] {
-        if let Some(rest) = t.strip_prefix(&k)
-            && let Some(rest) = rest.strip_prefix(':')
+    if let Some(rest) = t.strip_prefix(name)
+        && let Some(rest) = rest.trim_start_matches([' ', '\t']).strip_prefix(':')
+        && (rest.is_empty() || rest.starts_with([' ', '\t']))
+    {
+        return Some(rest);
+    }
+    let dq = scalar(&Value::String(name.to_string()));
+    let sq = format!("'{}'", name.replace('\'', "''"));
+    for quoted in [dq, sq] {
+        if let Some(rest) = t.strip_prefix(&quoted)
+            && let Some(rest) = rest.trim_start_matches([' ', '\t']).strip_prefix(':')
+            && (rest.is_empty() || rest.starts_with([' ', '\t']))
         {
             return Some(rest);
         }

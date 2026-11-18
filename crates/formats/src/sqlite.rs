@@ -1016,33 +1016,34 @@ fn is_strict(sql: &str) -> bool {
 /// Output-column positions in the stored record: PK columns first, then the remaining stored
 /// columns. A VIRTUAL generated column has no field in the record, so its position is `None`.
 fn without_rowid_order(table: &SchemaObject) -> Option<Vec<Option<usize>>> {
-    let generated: Vec<bool> = column_definitions(&table.sql).iter().map(|(_, rest)| is_virtual_column(rest)).collect();
+    let definitions = column_definitions(&table.sql);
+    let generated: Vec<bool> = definitions.iter().map(|(_, rest)| is_virtual_column(rest)).collect();
     let is_virtual = |i: usize| generated.get(i).copied().unwrap_or(false);
     let open = column_list_open(&table.sql)?;
     let close = column_list_close(&table.sql)?;
     let body = table.sql.get(open.checked_add(1)?..close)?;
     let mut stored = Vec::new();
+    let mut seen_keys = BTreeSet::new();
     for segment in split_top_level(body) {
         let tokens = sql_tokens(segment);
-        let Some(pk) = tokens
-            .windows(2)
-            .position(|pair| pair.first().is_some_and(|s| s.eq_ignore_ascii_case("PRIMARY")) && pair.get(1).is_some_and(|s| s.eq_ignore_ascii_case("KEY")))
-        else {
+        let term_groups: Vec<Vec<&[&str]>> = if is_table_constraint_segment(&tokens) {
+            table_primary_key_groups(&tokens)?
+        } else if has_top_level_primary_key(&tokens) {
+            vec![vec![tokens.get(..1)?]]
+        } else {
             continue;
         };
-        let table_constraint = tokens.first().is_some_and(|s| s.eq_ignore_ascii_case("PRIMARY") || s.eq_ignore_ascii_case("CONSTRAINT"));
-        let names: Vec<&str> = if table_constraint {
-            let tail = tokens.get(pk.checked_add(3)?..)?;
-            let end = tail.iter().position(|s| *s == ")")?;
-            tail.get(..end)?.split(|s| *s == ",").filter_map(|part| part.first().copied()).collect()
-        } else {
-            vec![*tokens.first()?]
-        };
-        for token in names {
-            let (name, _) = take_identifier(token);
-            let position = table.columns.iter().position(|column| column.name.eq_ignore_ascii_case(&name))?;
-            if !stored.contains(&position) {
-                stored.push(position);
+        for terms in term_groups {
+            for term in terms.into_iter().filter(|term| !term.is_empty()) {
+                let (token, collation) = primary_key_column(term)?;
+                let (name, _) = take_identifier(token);
+                let position = table.columns.iter().position(|column| column.name.eq_ignore_ascii_case(&name))?;
+                let collation =
+                    collation.or_else(|| definitions.get(position).and_then(|(_, rest)| top_level_collation(&sql_tokens(rest)))).unwrap_or("BINARY");
+                // SQLite retains repeated terms when they use different collations.
+                if seen_keys.insert((position, take_identifier(collation).0.to_ascii_lowercase())) {
+                    stored.push(position);
+                }
             }
         }
     }
@@ -1055,6 +1056,119 @@ fn without_rowid_order(table: &SchemaObject) -> Option<Vec<Option<usize>>> {
         }
     }
     (0..table.columns.len()).map(|i| if is_virtual(i) { Some(None) } else { stored.iter().position(|&column| column == i).map(Some) }).collect()
+}
+
+/// Report whether a CREATE TABLE segment starts with a table-constraint keyword.
+fn is_table_constraint_segment(tokens: &[&str]) -> bool {
+    tokens.first().is_some_and(|token| ["CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN"].iter().any(|word| token.eq_ignore_ascii_case(word)))
+}
+
+/// Report whether `PRIMARY KEY` appears outside parentheses in a column definition.
+fn has_top_level_primary_key(tokens: &[&str]) -> bool {
+    let mut depth = 0usize;
+    for (i, &token) in tokens.iter().enumerate() {
+        match token {
+            "(" => depth = depth.saturating_add(1),
+            ")" => depth = depth.saturating_sub(1),
+            _ if depth == 0
+                && token.eq_ignore_ascii_case("PRIMARY")
+                && tokens.get(i.saturating_add(1)).is_some_and(|next| next.eq_ignore_ascii_case("KEY")) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Collect each `PRIMARY KEY (...)` clause's top-level comma-separated term slices from a
+/// table-constraint segment, allowing adjacent comma-omitted constraints such as `UNIQUE(v) PRIMARY KEY(k)`.
+fn table_primary_key_groups<'a, 'b>(tokens: &'b [&'a str]) -> Option<Vec<Vec<&'b [&'a str]>>> {
+    let mut groups = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while let Some(&token) = tokens.get(i) {
+        if depth == 0 && token.eq_ignore_ascii_case("PRIMARY") && tokens.get(i.saturating_add(1)).is_some_and(|next| next.eq_ignore_ascii_case("KEY")) {
+            let open = i.saturating_add(2);
+            if tokens.get(open) != Some(&"(") {
+                return None;
+            }
+            let mut inner_depth = 1usize;
+            let mut cursor = open.saturating_add(1);
+            let mut terms = Vec::new();
+            let mut term_start = cursor;
+            while let Some(&inner) = tokens.get(cursor) {
+                match inner {
+                    "(" => inner_depth = inner_depth.saturating_add(1),
+                    ")" => {
+                        inner_depth = inner_depth.saturating_sub(1);
+                        if inner_depth == 0 {
+                            terms.push(tokens.get(term_start..cursor)?);
+                            break;
+                        }
+                    }
+                    "," if inner_depth == 1 => {
+                        terms.push(tokens.get(term_start..cursor)?);
+                        term_start = cursor.saturating_add(1);
+                    }
+                    _ => {}
+                }
+                cursor = cursor.saturating_add(1);
+            }
+            if inner_depth != 0 {
+                return None;
+            }
+            groups.push(terms);
+            i = cursor.saturating_add(1);
+            continue;
+        }
+        match token {
+            "(" => depth = depth.saturating_add(1),
+            ")" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i = i.saturating_add(1);
+    }
+    Some(groups)
+}
+
+/// Read a primary-key column and its outermost COLLATE, if given.
+fn primary_key_column<'a>(term: &[&'a str]) -> Option<(&'a str, Option<&'a str>)> {
+    let mut tokens = term.iter().copied();
+    let mut depth = 0usize;
+    let name = loop {
+        match tokens.next()? {
+            "(" => depth += 1,
+            name => break name,
+        }
+    };
+    let mut collation = None;
+    while let Some(token) = tokens.next() {
+        match token {
+            ")" => depth = depth.checked_sub(1)?,
+            _ if token.eq_ignore_ascii_case("COLLATE") => collation = Some(tokens.next()?),
+            _ if depth == 0 && (token.eq_ignore_ascii_case("ASC") || token.eq_ignore_ascii_case("DESC")) && tokens.next().is_none() => break,
+            _ => return None,
+        }
+    }
+    (depth == 0).then_some((name, collation))
+}
+
+/// Find the applicable COLLATE clause without looking inside expressions such as CHECK.
+fn top_level_collation<'a>(tokens: &[&'a str]) -> Option<&'a str> {
+    let mut depth = 0usize;
+    let mut collation = None;
+    let mut tokens = tokens.iter().copied();
+    while let Some(token) = tokens.next() {
+        match token {
+            "(" => depth = depth.saturating_add(1),
+            ")" => depth = depth.saturating_sub(1),
+            _ if depth == 0 && token.eq_ignore_ascii_case("COLLATE") => collation = tokens.next(),
+            _ => {}
+        }
+    }
+    collation
 }
 
 /// A generated column (`AS (expr)`, with or without `GENERATED ALWAYS`) is VIRTUAL unless
@@ -1173,7 +1287,7 @@ fn column_definitions(sql: &str) -> Vec<(Column, &str)> {
         if name.is_empty() && !seg.starts_with(['"', '`', '\'', '[']) {
             continue;
         }
-        let type_name = extract_type(strip_comments(rest).trim());
+        let type_name = extract_type(rest);
         cols.push((Column { name, type_name }, rest));
     }
     cols
@@ -1204,7 +1318,7 @@ fn rowid_alias_index(sql: &str) -> Option<usize> {
     if tail.windows(2).any(|w| w.first().is_some_and(|t| is(t, "WITHOUT")) && w.get(1).is_some_and(|t| is(t, "ROWID"))) {
         return None;
     }
-    let columns = parse_create_columns(sql);
+    let columns = column_definitions(sql);
     let mut key = None;
     let mut column = 0usize;
     let body_start = open.saturating_add(1);
@@ -1213,23 +1327,21 @@ fn rowid_alias_index(sql: &str) -> Option<usize> {
     for i in body_start..=close {
         let token = *tokens.get(i)?;
         if i == close || (token == "," && depth == 0) {
-            let mut segment = tokens.get(start..i)?;
+            let segment = tokens.get(start..i)?;
             start = i.saturating_add(1);
-            if segment.first().is_some_and(|t| is(t, "CONSTRAINT")) {
-                segment = segment.get(2..)?;
-            }
-            if segment.first().is_some_and(|t| is(t, "PRIMARY")) {
-                if key.is_some() || !segment.get(1).is_some_and(|t| is(t, "KEY")) || segment.get(2) != Some(&"(") {
-                    return None;
+            if is_table_constraint_segment(segment) {
+                let groups = table_primary_key_groups(segment)?;
+                for terms in groups {
+                    if key.is_some() || terms.len() != 1 {
+                        return None;
+                    }
+                    let term = *terms.first()?;
+                    let term = if term.last().is_some_and(|token| is(token, "AUTOINCREMENT")) { term.get(..term.len().checked_sub(1)?)? } else { term };
+                    let (name_token, _) = primary_key_column(term)?;
+                    let (name, _) = take_identifier(name_token);
+                    key = Some(columns.iter().position(|(column, _)| column.name.eq_ignore_ascii_case(&name))?);
                 }
-                let end = segment.iter().position(|t| *t == ")")?;
-                let members = segment.get(3..end)?;
-                if members.contains(&",") {
-                    return None;
-                }
-                let (name, _) = take_identifier(members.first()?);
-                key = Some(columns.iter().position(|c| c.name.eq_ignore_ascii_case(&name))?);
-            } else if !segment.first().is_some_and(|t| ["UNIQUE", "CHECK", "FOREIGN"].iter().any(|word| is(t, word))) {
+            } else {
                 let mut nesting = 0usize;
                 for (j, t) in segment.iter().enumerate().skip(1) {
                     match *t {
@@ -1255,7 +1367,11 @@ fn rowid_alias_index(sql: &str) -> Option<usize> {
         }
     }
     let index = key?;
-    columns.get(index)?.type_name.eq_ignore_ascii_case("INTEGER").then_some(index)
+    let (_, declaration) = columns.get(index)?;
+    // SQLite can display a quoted type such as `"INTEGER"(10)` as `INTEGER`. Check
+    // the entire type spelling before applying display dequoting.
+    let spelling = declared_type_spelling(declaration);
+    ["INTEGER", "\"INTEGER\"", "'INTEGER'", "`INTEGER`", "[INTEGER]"].iter().any(|integer| spelling.eq_ignore_ascii_case(integer)).then_some(index)
 }
 
 /// Keep quoted text intact so defaults and constraint names cannot become SQL keywords.
@@ -1742,17 +1858,25 @@ fn take_identifier(seg: &str) -> (String, &str) {
 /// The type name is the run of tokens before the first column-constraint keyword. A comma inside
 /// the type's parentheses belongs to it (`DECIMAL(10, 2)`); only the column separator is dropped.
 fn extract_type(rest: &str) -> String {
+    let cleaned = strip_comments(rest);
+    let trimmed = cleaned.trim_start();
+    if trimmed.starts_with('[') {
+        // SQLite dequotes the full span only when its interior contains no quotation marks.
+        let spelling = declared_type_spelling(rest);
+        let inner = spelling.as_bytes().get(1..spelling.len().saturating_sub(1)).unwrap_or(&[]);
+        if inner.iter().any(|&byte| matches!(byte, b'\'' | b'"' | b'`' | b'[')) {
+            return take_identifier(trimmed).0;
+        }
+        return String::from_utf8_lossy(inner).into_owned();
+    }
+    if trimmed.starts_with(['"', '`', '\'']) {
+        return take_identifier(trimmed).0;
+    }
     let mut out = String::new();
     let mut depth = 0i32;
-    for tok in rest.split_whitespace() {
+    for tok in trimmed.split_whitespace() {
         let bare = tok.trim_end_matches(',');
-        let upper = bare.to_ascii_uppercase();
-        if depth == 0
-            && matches!(
-                upper.as_str(),
-                "PRIMARY" | "NOT" | "NULL" | "UNIQUE" | "CHECK" | "DEFAULT" | "COLLATE" | "REFERENCES" | "GENERATED" | "AS" | "CONSTRAINT" | "AUTOINCREMENT"
-            )
-        {
+        if depth == 0 && (starts_column_constraint(bare) || bare.eq_ignore_ascii_case("GENERATED") || bare.eq_ignore_ascii_case("AUTOINCREMENT")) {
             break;
         }
         depth += tok.matches('(').count() as i32;
@@ -1763,6 +1887,55 @@ fn extract_type(rest: &str) -> String {
         out.push_str(if depth == 0 { bare } else { tok });
     }
     out
+}
+
+/// Slice the whole type declaration, including precision and additional type words.
+fn declared_type_spelling(declaration: &str) -> &str {
+    let tokens = sql_tokens(declaration);
+    let Some(first) = tokens.first() else { return "" };
+    let start = (first.as_ptr() as usize).saturating_sub(declaration.as_ptr() as usize);
+    let mut depth = 0usize;
+    let mut end = start;
+    for (i, &token) in tokens.iter().enumerate() {
+        if depth == 0
+            && (starts_column_constraint(token)
+                || (token.eq_ignore_ascii_case("GENERATED")
+                    && tokens.get(i + 1).is_some_and(|next| next.eq_ignore_ascii_case("ALWAYS"))
+                    && tokens.get(i + 2).is_some_and(|next| next.eq_ignore_ascii_case("AS"))))
+        {
+            break;
+        }
+        match token {
+            "(" => depth = depth.saturating_add(1),
+            ")" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        end = (token.as_ptr() as usize).saturating_sub(declaration.as_ptr() as usize) + token.len();
+    }
+    let spelling = declaration.get(start..end).unwrap_or("");
+    // SQLite's generated-column compatibility rule trims a trailing ALWAYS in types of at
+    // least 16 bytes, plus GENERATED immediately before it when present.
+    if spelling.len() >= 16
+        && let Some((stem, suffix)) = spelling.split_at_checked(spelling.len() - "ALWAYS".len())
+        && suffix.eq_ignore_ascii_case("ALWAYS")
+    {
+        let stem = stem.trim_ascii_end();
+        if let Some((prefix, suffix)) = stem.split_at_checked(stem.len().saturating_sub("GENERATED".len()))
+            && suffix.eq_ignore_ascii_case("GENERATED")
+        {
+            return prefix.trim_ascii_end();
+        }
+        return stem;
+    }
+    spelling
+}
+
+/// Unambiguous first tokens for a SQLite column constraint.
+fn starts_column_constraint(token: &str) -> bool {
+    matches!(
+        token.to_ascii_uppercase().as_str(),
+        "PRIMARY" | "NOT" | "NULL" | "UNIQUE" | "CHECK" | "DEFAULT" | "COLLATE" | "REFERENCES" | "DEFERRABLE" | "AS" | "CONSTRAINT"
+    )
 }
 
 #[cfg(test)]

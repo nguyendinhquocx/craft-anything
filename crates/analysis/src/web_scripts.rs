@@ -213,25 +213,40 @@ fn with_suffix(path: &str, suffix: &str) -> String {
 /// Map a generated position (1-based line, 0-based column) to original positions, with a few
 /// lines of original source around each when the map embeds it.
 pub fn trace_location(map: &SourceMap, line: u32, column: u32, context: u32) -> Value {
-    let positions = map.original_positions(line.saturating_sub(1), column);
+    let line0 = line.saturating_sub(1);
+    let positions = map.original_positions(line0, column);
+    let leaf = leaf_map(map, line0, column);
     let rows: Vec<Value> = positions
         .iter()
         .map(|p| {
-            let snippet = map_content(map, p.source_index).map(|text| {
+            let snippet = leaf.source_content(p.source_index).map(|text| {
                 let first = p.line.saturating_sub(context);
                 text.lines().enumerate().skip(first as usize).take((context * 2 + 1) as usize).map(|(i, l)| json!({"line": i + 1, "text": l.chars().take(400).collect::<String>()})).collect::<Vec<_>>()
             });
-            json!({"source": p.source, "line": p.line + 1, "column": p.column, "name": p.name, "generated_column": p.generated_column, "context": snippet, "ignored": map.ignore_list.contains(&p.source_index)})
+            json!({"source": p.source, "line": p.line + 1, "column": p.column, "name": p.name, "generated_column": p.generated_column, "context": snippet, "ignored": leaf.ignore_list.contains(&p.source_index)})
         })
         .collect();
-    json!({"generated": {"line": line, "column": column}, "original_positions": rows, "found": !rows.is_empty(), "sources": map.sources.len(), "segments": map.segments})
+    json!({"generated": {"line": line, "column": column}, "original_positions": rows, "found": !rows.is_empty(), "sources": source_count(map), "segments": map.segments})
 }
 
-fn map_content(map: &SourceMap, idx: u32) -> Option<&str> {
-    if map.sections.is_empty() {
-        return map.source_content(idx);
+/// Resolve the leaf section map covering 0-based `(line, column)`, or `map` itself when flat.
+fn leaf_map(mut map: &SourceMap, mut line: u32, mut column: u32) -> &SourceMap {
+    while !map.sections.is_empty() {
+        let end = map.sections.partition_point(|(l, c, _)| (*l, *c) <= (line, column));
+        let Some((l, c, child)) = end.checked_sub(1).and_then(|i| map.sections.get(i)) else {
+            return map;
+        };
+        let rel_line = line.saturating_sub(*l);
+        column = if rel_line == 0 { column.saturating_sub(*c) } else { column };
+        line = rel_line;
+        map = child;
     }
-    None
+    map
+}
+
+/// Count total source entries across `map` and any inline sections.
+fn source_count(map: &SourceMap) -> usize {
+    map.sections.iter().fold(map.sources.len(), |n, (_, _, sub)| n.saturating_add(source_count(sub)))
 }
 
 /// Parse a map from bytes (raw JSON or a `data:` URL's payload).

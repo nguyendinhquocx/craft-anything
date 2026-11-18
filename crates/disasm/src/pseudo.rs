@@ -82,6 +82,11 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// True when `op` is the AArch64 zero register (`wzr` or `xzr`).
+fn is_zero_reg(op: Option<&Op>) -> bool {
+    matches!(op, Some(Op::Reg(r)) if matches!(r.as_str(), "wzr" | "xzr"))
+}
+
 fn ty(size: u8) -> &'static str {
     match size {
         1 => "uint8_t",
@@ -140,10 +145,35 @@ impl Lifter<'_> {
         (self.names)(a).or_else(|| self.prog.name_at(a))
     }
 
+    /// Inline a string literal at `a`, slicing by byte offset for UTF-8 and 2-byte code-unit offset
+    /// for UTF-16LE while rejecting misaligned interior addresses.
     fn string_lit(&mut self, a: u64) -> Option<String> {
         let s = self.prog.string_at(a)?;
-        let off = a.checked_sub(s.addr)?;
-        let text: String = if off == 0 { s.text.clone() } else { s.text.chars().skip(off as usize).collect() };
+        let off = usize::try_from(a.checked_sub(s.addr)?).ok()?;
+        let text = match s.encoding {
+            craft_anything_formats::strings::Encoding::Ascii | craft_anything_formats::strings::Encoding::Utf8 => {
+                let tail = s.text.get(off..)?;
+                if off > 0 && tail.is_empty() {
+                    return None;
+                }
+                tail.to_string()
+            }
+            craft_anything_formats::strings::Encoding::Utf16le => {
+                if off == 0 {
+                    s.text.clone()
+                } else {
+                    if !off.is_multiple_of(2) {
+                        return None;
+                    }
+                    let units: Vec<u16> = s.text.encode_utf16().collect();
+                    let tail = units.get(off / 2..)?;
+                    if tail.is_empty() {
+                        return None;
+                    }
+                    String::from_utf16(tail).ok()?
+                }
+            }
+        };
         if !self.strings.contains(&text) && self.strings.len() < 256 {
             self.strings.push(text.clone());
         }
@@ -465,14 +495,15 @@ impl Lifter<'_> {
                 (Kind::Cmp | Kind::Test, _) => flag_src = Some(i),
                 (Kind::Mov | Kind::MovSx | Kind::MovZx, _) if i.ops.len() >= 2 => {
                     let (dd, ss) = (d.clone().unwrap_or_default(), s.clone().unwrap_or_default());
-                    if (frame_reg(&dd) && dest_reg.is_some()) || dd == ss {
-                        // frame setup (mov rbp, rsp / mov x29, sp)
+                    let zero_dst = self.mode == Mode::A64 && is_zero_reg(i.ops.first());
+                    if (frame_reg(&dd) && dest_reg.is_some()) || dd == ss || zero_dst {
+                        // frame setup (mov rbp, rsp / mov x29, sp) or discarded write to wzr/xzr
                     } else {
                         stmt = Some(format!("{dd} = {ss};"));
                     }
                     // A register set to a plain immediate holds a constant a MOVK can fold with
                     // (a W register's constant lives in the low 32 bits).
-                    if let (Some(Op::Reg(r)), Some(Op::Imm(v))) = (i.ops.first(), i.ops.get(1)) {
+                    if !zero_dst && let (Some(Op::Reg(r)), Some(Op::Imm(v))) = (i.ops.first(), i.ops.get(1)) {
                         let value = if r.starts_with('w') { u64::from(*v as u32) } else { *v as u64 };
                         const_def = Some((canonical_reg(r), value));
                     }
@@ -536,6 +567,8 @@ impl Lifter<'_> {
                     }
                     if dest_reg.as_deref().is_some_and(frame_reg) && matches!(i.kind, Kind::Add | Kind::Sub) {
                         // stack frame adjustment
+                    } else if self.mode == Mode::A64 && is_zero_reg(i.ops.first()) {
+                        // discarded write to wzr/xzr (e.g. `cmn` = `adds xzr, …`); flags are kept above
                     } else if i.kind == Kind::Xor && i.ops.len() == 2 && i.ops.first() == i.ops.get(1) {
                         stmt = Some(format!("{dd} = 0;"));
                     } else if self.mode == Mode::A64 && i.kind == Kind::Add && i.refs.first().is_some_and(|r| self.prog.string_at(*r).is_some()) {
@@ -670,9 +703,10 @@ impl Lifter<'_> {
             other => other.op(),
         };
         let Some(src) = src else { return format!("/* {c:?} */ flags") };
+        let zero_dst = self.mode == Mode::A64 && is_zero_reg(src.ops.first());
         let a = src.ops.first().map(|o| self.op(o)).unwrap_or_default();
-        // ARM compare aliases encode the zero register first.
-        let (a, b) = if self.mode == Mode::A64 && matches!(src.kind, Kind::Cmp | Kind::Test) {
+        // ARM compare/test/cmn aliases encode the zero register first.
+        let (a, b) = if self.mode == Mode::A64 && (matches!(src.kind, Kind::Cmp | Kind::Test) || (src.kind == Kind::Add && zero_dst)) {
             (src.ops.get(1).map(|o| self.op(o)).unwrap_or_default(), src.ops.get(2).map(|o| self.op(o)).unwrap_or_default())
         } else {
             (a, src.ops.get(1).map(|o| self.op(o)).unwrap_or_default())
@@ -694,6 +728,7 @@ impl Lifter<'_> {
                     format!("({a} & {b}) {op} 0")
                 }
             }
+            Kind::Add if zero_dst => format!("({a} + {b}) {op} 0{unsigned}"),
             _ => format!("{a} {op} 0{unsigned}"),
         }
     }

@@ -606,6 +606,13 @@ pub(crate) fn inventory_path(path: &Path, limits: InvLimits, cancel: &CancelToke
     inventory_path_unlisted(path, limits, cancel).map(|(inv, subject, _)| (inv, subject))
 }
 
+/// What a folder walk found at one path, for listing its results in one order.
+enum WalkEntry<'a> {
+    Dir,
+    Link,
+    File(&'a WalkedFile),
+}
+
 /// [`inventory_path`], also returning the folders that couldn't be listed, as (path, reason).
 #[allow(clippy::type_complexity)]
 fn inventory_path_unlisted(path: &Path, limits: InvLimits, cancel: &CancelToken) -> Result<(Inventory, Subject, Vec<(String, String)>), ToolError> {
@@ -617,27 +624,42 @@ fn inventory_path_unlisted(path: &Path, limits: InvLimits, cancel: &CancelToken)
         let walked =
             walk_dir(path, &WalkOptions { max_files: limits.max_entries, max_depth: 64, skip_dir: &skip, gitignore: false, include_hidden: true }, cancel)?;
         let mut inv = Inventorier::new(&name, "directory", limits, &check);
-        for d in &walked.dirs {
-            let failed = walked.unlisted.iter().find(|(rel, _)| rel == d);
-            inv.add_marker(d, "directory", 0, failed.map(|(_, e)| format!("couldn't be listed: {e}")));
-        }
-        for l in &walked.links {
-            inv.add_marker(l, "link", 0, Some("symbolic link (not followed)".into()));
-        }
+        // One list in path order, so `max_entries` cuts the tree where a listing of it would end.
+        // Adding every folder and link first let them push the files out: a folder with five
+        // files and thousands of subfolders read as holding none.
+        let mut entries: Vec<(&str, WalkEntry<'_>)> = Vec::with_capacity(walked.dirs.len() + walked.links.len() + walked.files.len());
+        entries.extend(walked.dirs.iter().map(|d| (d.as_str(), WalkEntry::Dir)));
+        entries.extend(walked.links.iter().map(|l| (l.as_str(), WalkEntry::Link)));
+        entries.extend(walked.files.iter().map(|f| (f.rel.as_str(), WalkEntry::File(f))));
+        entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut total = 0u64;
-        for f in &walked.files {
+        for (rel, entry) in entries {
             cancel.check()?;
-            if total.saturating_add(f.size) > limits.max_total_bytes || f.size > limits.max_entry_bytes {
-                inv.add_marker(&f.rel, "unread", 0, Some("size budget reached".into()));
+            if inv.inv.entries.len() >= limits.max_entries {
+                // Nothing after this point is listed, so nothing after it is read either.
                 inv.inv.truncated = true;
-                continue;
+                break;
             }
-            match std::fs::read(&f.abs) {
-                Ok(b) => {
-                    total += b.len() as u64;
-                    inv.add_file(&f.rel, &b, 0).map_err(|_| ToolError::cancelled())?;
+            match entry {
+                WalkEntry::Dir => {
+                    let failed = walked.unlisted.iter().find(|(r, _)| r == rel);
+                    inv.add_marker(rel, "directory", 0, failed.map(|(_, e)| format!("couldn't be listed: {e}")));
                 }
-                Err(e) => inv.add_marker(&f.rel, "unread", 0, Some(e.to_string())),
+                WalkEntry::Link => inv.add_marker(rel, "link", 0, Some("symbolic link (not followed)".into())),
+                WalkEntry::File(f) => {
+                    if total.saturating_add(f.size) > limits.max_total_bytes || f.size > limits.max_entry_bytes {
+                        inv.add_marker(rel, "unread", 0, Some("size budget reached".into()));
+                        inv.inv.truncated = true;
+                        continue;
+                    }
+                    match std::fs::read(&f.abs) {
+                        Ok(b) => {
+                            total += b.len() as u64;
+                            inv.add_file(rel, &b, 0).map_err(|_| ToolError::cancelled())?;
+                        }
+                        Err(e) => inv.add_marker(rel, "unread", 0, Some(e.to_string())),
+                    }
+                }
             }
         }
         let mut out = inv.finish();
@@ -1067,6 +1089,35 @@ mod tests {
             assert_eq!(inv["result"]["entries"].as_array().unwrap().iter().any(|entry| entry["note"] == "nested archive not opened: depth limit"), unopened);
             assert_eq!(inv["result"]["truncated"], false);
         }
+    }
+
+    /// A folder's inventory used to add every folder and link before any file, so a small
+    /// `max_entries` filled up with folders and the files beside them were never listed.
+    #[test]
+    fn a_folder_inventory_is_cut_in_path_order_not_folders_first() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 1..=5 {
+            std::fs::write(dir.path().join(format!("a{i}.txt")), format!("file {i}")).unwrap();
+        }
+        for d in 0..20 {
+            std::fs::create_dir_all(dir.path().join("zz").join(format!("sub{d:02}"))).unwrap();
+        }
+        let limits = InvLimits { max_entries: 10, ..InvLimits::default() };
+        let (inv, _) = inventory_path(dir.path(), limits, &CancelToken::default()).unwrap();
+        let paths: Vec<&str> = inv.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["a1.txt", "a2.txt", "a3.txt", "a4.txt", "a5.txt", "zz", "zz/sub00", "zz/sub01", "zz/sub02", "zz/sub03"]);
+        assert_eq!(inv.entries.iter().filter(|e| e.sha256.is_some()).count(), 5, "every file is read and hashed");
+        assert!(inv.truncated);
+        // Through the tool, as the person meets it: the summary counts the files.
+        let e = Engine::new(crate::testing::session());
+        let out = call(&e, "core_archive_show", json!({"path": dir.path(), "max_entries": 10})).unwrap();
+        assert_eq!(out["result"]["files"], 5, "{}", out["summary"]);
+        assert_eq!(out["result"]["truncated"], true);
+        // A limit the tree fits in lists all of it, in the same order, and isn't cut.
+        let (whole, _) = inventory_path(dir.path(), InvLimits { max_entries: 26, ..InvLimits::default() }, &CancelToken::default()).unwrap();
+        assert_eq!(whole.entries.len(), 26);
+        assert_eq!(whole.entries.iter().map(|e| e.path.as_str()).take(10).collect::<Vec<_>>(), paths);
+        assert!(!whole.truncated);
     }
 
     #[test]

@@ -204,6 +204,30 @@ fn turning_on_generated_assets_without_a_fal_key_asks_for_one() {
 }
 
 #[test]
+fn ghidra_is_looked_up_once_and_again_only_when_asked() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join("engines");
+    let remembered = std::path::PathBuf::from("/remembered/support/analyzeHeadless");
+    let found = remembered.clone();
+    let mut h = harness_sized(egui::vec2(1280.0, 800.0), move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        // An empty engine store, and nowhere else looked in: a lookup finds no Ghidra here.
+        a.settings.engines.store_dir = Some(store);
+        a.settings.engines.only_configured = true;
+        a.ghidra.found = Some(Some(found));
+        a
+    });
+    h.run_steps(3);
+    // What was found is kept while drawing, not looked up again (a lookup would find nothing).
+    assert_eq!(h.state_mut().ghidra_found(), Some(remembered.as_path()));
+    assert!(h.state_mut().ghidra_ready());
+    // After a settings change or an install it is looked up again.
+    h.state_mut().ghidra.found = None;
+    assert_eq!(h.state_mut().ghidra_found(), None);
+    assert!(!h.state_mut().ghidra_ready());
+}
+
+#[test]
 fn deep_mode_without_ghidra_asks_to_get_it_before_using_it() {
     use craft_anything_engine::workspace::TargetRef;
     use craft_anything_engines::game::{Builder, Installed, Inventory};
@@ -859,6 +883,33 @@ fn a_question_about_the_build_is_answered_without_building() {
     assert!(!h.state().runs.is_busy(&root));
 }
 
+/// #1695: a project built by an agent that isn't asked questions (Codex) says so before a question
+/// is sent, and the question stays in the box.
+#[test]
+fn a_question_the_builder_cannot_answer_is_refused_before_it_is_sent() {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::create(d.path(), "Snake", "A snake game", TargetRef::None).unwrap();
+    ws.manifest.builder = Some("Codex".into());
+    let root = ws.root.clone();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.backends =
+            vec![BackendConfig { name: "Codex".into(), kind: BackendKind::AgentCli, model: "codex".into(), base_url: None, ssh_host: None, enabled: true }];
+        a.workspace = Some(ws);
+        a.state.screen = Screen::Project;
+        a
+    });
+    h.run_steps(2);
+    h.state_mut().state.project_input = "/btw where are the latest files".into();
+    h.run_steps(1);
+    h.get_by_label("Send (Enter)").click();
+    h.run_steps(2);
+    assert!(h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("Codex can't be kept to only reading")), "{:?}", h.state().state.toasts);
+    assert_eq!(h.state().state.project_input, "/btw where are the latest files", "it stays in the box");
+    assert!(h.state().asked.get(&root).is_none_or(Vec::is_empty), "nothing was asked");
+}
+
 #[test]
 fn a_long_answer_scrolls_with_the_conversation_and_comes_back_after_a_restart() {
     use craft_anything_engine::questions::{self, AskedQuestion};
@@ -1344,6 +1395,9 @@ fn an_ais_model_is_changed_in_settings() {
     h.get_by_label("Change…").click();
     assert!(wait(&mut h, |a| a.model_picker.as_ref().is_some_and(|(_, m)| m.as_deref() == Some(&["nomic-embed-text".to_string(), "qwen3:8b".into()][..]))));
     h.run_steps(2);
+    // An API backend shows its saved model, never Claude Code's "default" label.
+    h.get_by_value("nomic-embed-text");
+    assert!(h.query_by_value("Default (its own settings)").is_none());
     h.state_mut().set_model("Box", "qwen3:8b");
     assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box" && b.model == "qwen3:8b")));
     h.run_steps(2);
@@ -1351,29 +1405,73 @@ fn an_ais_model_is_changed_in_settings() {
     assert!(h.state().model_picker.is_none(), "the picker closes once a model is chosen");
 }
 
-/// #470: a model the list doesn't offer can be typed in.
 #[test]
-fn a_model_the_list_doesnt_offer_can_be_typed_in() {
-    let url = model_server();
-    let mut h = harness(move || {
-        let mut a = demo::app(demo::engine(Mode::Experienced, true));
-        a.hub.add_server("Box", &url, Some("nomic-embed-text"), None).unwrap();
-        a.state.settings_open = true;
-        a.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
-        a
+fn an_api_backends_request_rate_is_set_in_settings() {
+    let mut h = harness(|| {
+        let mut app = demo::app(demo::engine(Mode::Experienced, true));
+        app.hub
+            .add_backend(
+                BackendConfig {
+                    name: "Local model".into(),
+                    kind: BackendKind::OpenaiCompatible,
+                    model: "test".into(),
+                    base_url: None,
+                    ssh_host: None,
+                    enabled: true,
+                },
+                None,
+            )
+            .unwrap();
+        app.state.settings_open = true;
+        app.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+        app
     });
     h.state_mut().refresh_backends();
-    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box")));
+    assert!(wait(&mut h, |app| app.backends.iter().any(|backend| backend.name == "Local model")));
+    h.get_by_label("Requests per minute").focus();
     h.run_steps(2);
-    h.get_by_label("Change…").click();
-    assert!(wait(&mut h, |a| a.model_picker.as_ref().is_some_and(|(_, m)| m.is_some())));
+    h.get_by_label("Requests per minute").type_text("120");
     h.run_steps(2);
-    h.get_by_label("Another model").click();
-    h.run_steps(1);
-    h.get_by_label("Another model").type_text("my-own-model");
-    h.run_steps(1);
-    h.key_press(egui::Key::Enter);
-    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box" && b.model == "my-own-model")));
+    h.get_by_label("Apply").click();
+    assert!(wait(&mut h, |app| app.backend_options.get("Local model").and_then(|options| options.requests_per_minute) == Some(120)));
+}
+
+/// R5.4: an API backend's tool list is chosen in Settings → AI, beside what Auto works out to.
+#[test]
+fn an_api_backends_tool_list_is_chosen_in_settings() {
+    let mut h = harness(|| {
+        let mut app = demo::app(demo::engine(Mode::Experienced, true));
+        app.hub
+            .add_backend(
+                BackendConfig {
+                    name: "Local model".into(),
+                    kind: BackendKind::OpenaiCompatible,
+                    model: "test".into(),
+                    base_url: None,
+                    ssh_host: None,
+                    enabled: true,
+                },
+                None,
+            )
+            .unwrap();
+        app.state.settings_open = true;
+        app.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+        app
+    });
+    h.state_mut().refresh_backends();
+    assert!(wait(&mut h, |app| app.backends.iter().any(|backend| backend.name == "Local model")));
+    h.get_by_label_contains("below a 64k window");
+    h.get_by_label("Builder's tools").click();
+    h.run_steps(2);
+    h.get_by_label("full").click();
+    assert!(wait(&mut h, |app| app.backend_options.get("Local model").and_then(|options| options.tools) == Some(craft_anything_ai::ToolList::Full)));
+    // The row waits for each save (#1946 review), and takes the next choice once it's done.
+    assert!(wait(&mut h, |app| app.jobs.running().next().is_none()));
+    h.run_steps(2);
+    h.get_by_label("Builder's tools").click();
+    h.run_steps(2);
+    h.get_by_label("lean").click();
+    assert!(wait(&mut h, |app| app.backend_options.get("Local model").and_then(|options| options.tools) == Some(craft_anything_ai::ToolList::Lean)));
 }
 
 /// #54, #98: an AI server on another computer is added by its address in Settings → AI, with a
@@ -1405,6 +1503,55 @@ fn an_ai_server_is_added_by_its_address() {
     h.get_by_label("Add").click();
     assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Studio box" && b.model == "qwen3:8b")), "added with a model that can chat");
     assert!(h.state().server_form.name.is_empty(), "the form empties once it's added");
+}
+
+/// #1434, review of #1436: a server's chat models are chosen from its dropdown, and a model picked
+/// there goes once the address is changed, so Add can't ask another server for it. A model typed
+/// by hand stays.
+#[test]
+fn a_model_picked_from_a_servers_list_is_chosen_there_and_goes_with_its_address() {
+    const A: &str = "http://127.0.0.1:0/v1";
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Experienced, true));
+        a.state.settings_open = true;
+        a.state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+        a.server_form = craft_anything_ui_egui::ServerForm {
+            name: "Npu".into(),
+            address: A.into(),
+            choices: Some((A.into(), vec!["deepseek-r1:8b".into(), "qwen3:8b".into()])),
+            ..Default::default()
+        };
+        a
+    });
+    h.run_steps(2);
+    // The form sits below the fold of the AI page: scroll to it, as a person would.
+    h.event(egui::Event::PointerMoved(egui::pos2(640.0, 400.0)));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -300.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(20);
+    h.get_by_label("Choose a model").click();
+    h.run_steps(3);
+    h.get_by_label("qwen3:8b").click();
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.model, "qwen3:8b", "the dropdown fills the model field");
+    // The address is edited: the picked model was that server's, so it goes.
+    h.get_by_label("Server address").focus();
+    h.run_steps(1);
+    h.get_by_label("Server address").type_text("x");
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.address, format!("{A}x"));
+    assert_eq!(h.state().server_form.model, "", "a model picked for another address goes");
+    assert!(h.query_by_label("Choose a model").is_none(), "nor is that address's list offered");
+    // A model typed by hand isn't touched by an address change.
+    h.state_mut().server_form.model = "my-own-model".into();
+    h.run_steps(1);
+    h.get_by_label("Server address").type_text("y");
+    h.run_steps(3);
+    assert_eq!(h.state().server_form.model, "my-own-model", "a typed model stays");
 }
 
 /// #53: an agent app installed where it isn't looked for gets its program chosen in Settings → AI,
@@ -1488,6 +1635,97 @@ fn a_claude_ais_effort_is_set_in_settings() {
     assert!(wait(&mut h, |a| a.backend_options.get("Claude Code").and_then(|o| o.effort) == Some(Effort::Max)));
     h.run_steps(2);
     h.get_by_value("max");
+}
+
+/// #1813: an OpenAI-compatible AI has an effort setting too, showing "default" (nothing sent)
+/// until a level is chosen, and back again.
+#[test]
+fn an_openai_compatible_ais_effort_is_set_in_settings() {
+    use craft_anything_ai::{BackendConfig, BackendKind, Effort};
+    let mut h = harness(|| {
+        let a = demo::app(demo::engine(Mode::Experienced, true));
+        let cfg = BackendConfig {
+            name: "Box".into(),
+            kind: BackendKind::OpenaiCompatible,
+            model: "m".into(),
+            base_url: Some("http://127.0.0.1:0/v1".into()),
+            ssh_host: None,
+            enabled: true,
+        };
+        a.hub.add_backend(cfg, None).unwrap();
+        a
+    });
+    h.state_mut().refresh_backends();
+    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Box")));
+    h.state_mut().state.settings_open = true;
+    h.state_mut().state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+    h.run_steps(2);
+    h.get_by_label("Effort:");
+    h.get_by_value("default").click();
+    h.run();
+    assert!(h.query_by_label("max").is_none(), "only OpenAI's levels");
+    h.get_by_label("xhigh").click();
+    assert!(wait(&mut h, |a| a.backend_options.get("Box").and_then(|o| o.effort) == Some(Effort::Xhigh)));
+    h.run_steps(2);
+    h.get_by_value("xhigh").click();
+    h.run();
+    h.get_by_label("default").click();
+    assert!(wait(&mut h, |a| a.backend_options.get("Box").and_then(|o| o.effort).is_none()));
+}
+
+/// Claude Code's model can be left at "Default (its own settings)", so a model customised in the
+/// person's own Claude Code config isn't overridden by a built-in default.
+#[test]
+fn claude_codes_model_can_be_left_to_its_own_settings() {
+    use craft_anything_ai::BackendConfig;
+    let mut h = harness(|| {
+        let a = demo::app(demo::engine(Mode::Experienced, true));
+        a.hub
+            .add_backend(
+                BackendConfig {
+                    name: "Claude Code".into(),
+                    kind: craft_anything_ai::BackendKind::AgentCli,
+                    model: "claude-code".into(),
+                    base_url: None,
+                    ssh_host: None,
+                    enabled: true,
+                },
+                None,
+            )
+            .unwrap();
+        a
+    });
+    h.state_mut().refresh_backends();
+    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Claude Code")));
+    h.state_mut().state.settings_open = true;
+    h.state_mut().state.settings_tab = craft_anything_ui_egui::state::SettingsTab::Ai;
+    h.run_steps(2);
+    // With no choice saved, the picker says the default, and no model is passed on a run.
+    h.get_by_label("Model: Claude Code default");
+    h.get_by_label("Change…").click();
+    assert!(wait(&mut h, |a| {
+        a.model_picker
+            .as_ref()
+            .is_some_and(|(_, m)| m.as_deref().is_some_and(|models| models.first().is_some_and(|m| m == craft_anything_ai::anthropic::CLAUDE_CODE_DEFAULT)))
+    }));
+    h.run_steps(2);
+    // The dropdown shows the saved choice and lists "Default (its own settings)" first.
+    h.get_by_value("Default (its own settings)").click();
+    h.run_steps(2);
+    h.get_by_label("claude-sonnet-5-5").click();
+    assert!(wait(&mut h, |a| a.backend_options.get("Claude Code").and_then(|o| o.cli_model.as_deref()) == Some("claude-sonnet-5-5")));
+    h.run_steps(2);
+    // "Default (its own settings)" as the first choice: choosing it clears the saved model, so the
+    // run passes no `--model` and the person's own Claude Code config decides.
+    h.get_by_label("Change…").click();
+    assert!(wait(&mut h, |a| a.model_picker.as_ref().is_some_and(|(_, m)| m.is_some())));
+    h.run_steps(2);
+    h.get_by_value("claude-sonnet-5-5").click();
+    h.run_steps(2);
+    h.get_by_label("Default (its own settings)").click();
+    assert!(wait(&mut h, |a| a.backend_options.get("Claude Code").is_some_and(|o| o.cli_model.is_none())));
+    h.run_steps(2);
+    h.get_by_label("Model: Claude Code default");
 }
 
 /// The picker exposes only the chosen model's depths and clears an old depth when changing models.
@@ -1578,16 +1816,26 @@ fn claude_codes_account_folder_is_set_in_settings() {
     assert!(h.state().folder_inputs.is_empty(), "nothing left being typed");
     // A relative folder is refused; the saved one stays.
     h.state_mut().set_agent_folder("Claude Code", Some("claude-work".into()));
-    h.run_steps(4);
+    // Refusing a folder is background work too: an unchanged value alone does not mean the
+    // refusal has finished. Do not overlap it with the next settings mutation.
+    assert!(wait(&mut h, |a| a.jobs.running().next().is_none()));
     assert_eq!(chosen(h.state()).as_deref(), Some("~/.claude-work"));
     // Emptied, it's the usual folder again.
     h.state_mut().set_agent_folder("Claude Code", Some(String::new()));
-    assert!(wait(&mut h, |a| chosen(a).is_none()));
+    assert!(wait(&mut h, |a| chosen(a).is_none() && a.jobs.running().next().is_none()));
     // Added already, so it's offered again under the next free name, on the coding agents' tab.
     h.state_mut().state.detect_tab = Some(craft_anything_ui_egui::detect_tabs::DetectTab::Harnesses);
     h.run_steps(2);
+    h.get_by_label("Add another").scroll_to_me();
+    h.run();
     h.get_by_label("Add another").click();
-    assert!(wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Claude Code 2" && b.model == "claude-code")));
+    assert!(
+        wait(&mut h, |a| a.backends.iter().any(|b| b.name == "Claude Code 2" && b.model == "claude-code")),
+        "backends: {:?}; jobs: {:?}; toasts: {:?}",
+        h.state().backends,
+        h.state().jobs.list.iter().map(|j| (&j.title, &j.outcome)).collect::<Vec<_>>(),
+        h.state().state.toasts
+    );
 }
 
 /// Zoom keys stop at 50% and 200%, Cmd/Ctrl 0 goes back to 100%, and a zoom saved outside the
@@ -1645,6 +1893,35 @@ fn title_bar_keeps_its_size_when_zoomed() {
     }
 }
 
+/// Review of #1234: with System chosen, what's drawn follows the system's appearance frame by
+/// frame (`CraftApp::tick` reads it from each frame's input), back and forth; a chosen theme
+/// stays as it is whatever the system says.
+#[test]
+fn the_system_theme_follows_the_systems_appearance_as_it_changes() {
+    use craft_anything_ui_egui::theme::ThemeKind;
+    use egui::Theme::{Dark, Light};
+    let mut h = harness(|| demo::app(demo::engine(Mode::Beginner, true)));
+    h.run_steps(2);
+    assert_eq!(h.state().settings.theme, "system", "System is the default");
+    let drawn_dark = |h: &Harness<'static, CraftApp>| h.ctx.global_style().visuals.dark_mode;
+    for (system, kind) in [(Light, ThemeKind::StudioLight), (Dark, ThemeKind::Studio), (Light, ThemeKind::StudioLight)] {
+        h.input_mut().system_theme = Some(system);
+        h.run_steps(2);
+        assert_eq!(h.state().theme_kind(), kind, "System with the system {system:?}");
+        assert_eq!(drawn_dark(&h), kind == ThemeKind::Studio, "drawn to match the system {system:?}");
+    }
+    // A chosen theme overrides the system's appearance as it changes.
+    for (chosen, kind) in [("studio", ThemeKind::Studio), ("studio-light", ThemeKind::StudioLight)] {
+        h.state_mut().settings.theme = chosen.into();
+        for system in [Light, Dark, Light] {
+            h.input_mut().system_theme = Some(system);
+            h.run_steps(2);
+            assert_eq!(h.state().theme_kind(), kind, "{chosen} with the system {system:?}");
+            assert_eq!(drawn_dark(&h), kind == ThemeKind::Studio, "{chosen} drawn with the system {system:?}");
+        }
+    }
+}
+
 #[test]
 fn settings_window_tabs_draw() {
     let mut h = harness(|| {
@@ -1662,9 +1939,17 @@ fn settings_window_tabs_draw() {
         h.run_steps(2);
         assert_eq!(edge(&h), right, "the Settings window changed width on {tab}");
     }
+    // System is the default; picking a theme keeps it, and System can be picked again.
+    assert_eq!(h.state().settings.theme, "system");
     h.get_by_label("Studio Light").click();
     h.run_steps(3);
     assert_eq!(h.state().settings.theme, "studio-light");
+    assert_eq!(h.state().theme_kind(), craft_anything_ui_egui::theme::ThemeKind::StudioLight);
+    // Language says "System" too when none is chosen: take the one on Studio's line.
+    let line = h.get_by_label("Studio").rect().center().y;
+    h.query_all_by_label("System").find(|n| (n.rect().center().y - line).abs() < 4.0).expect("System beside Studio").click();
+    h.run_steps(3);
+    assert_eq!(h.state().settings.theme, "system");
 
     // At the same window size, the same tab keeps its content bounds with and without scrolling.
     let content_bounds = |overflow: bool| {

@@ -990,8 +990,10 @@ pub fn analyze_application(input: &AppInput, opts: &AppOptions, cancelled: &dyn 
     // all, or its code may not ship.
     for (p, _) in &input.listing {
         let path = unprefixed(p);
-        if path.ends_with(".map") && !path.contains("node_modules/") && !g.source_maps.iter().any(|s| s.resolved.as_deref() == Some(path)) {
-            let script = path.trim_end_matches(".map");
+        if let Some(script) = path.strip_suffix(".map")
+            && !path.contains("node_modules/")
+            && !g.source_maps.iter().any(|s| s.resolved.as_deref() == Some(path))
+        {
             let mut r = SourceMapRef { script: script.to_string(), resolved: Some(path.to_string()), present: true, ..Default::default() };
             if is_script(script) && analysed.iter().any(|a| a.path == script) {
                 match input.files.iter().find(|f| f.path == path) {
@@ -1211,7 +1213,7 @@ fn read_source_map(
                     format!("The source map for {script} points at {} external map(s) that weren't read, so its sources are incomplete.", r.external_sections),
                 ));
             }
-            r.sources_with_content = map.sources_content.iter().filter(|c| c.is_some()).count();
+            r.sources_with_content = count_sources_with_content(&map);
         }
         // Refused at one of the parser's limits: incomplete rather than unreadable.
         Err(e) if is_limit(&e) => {
@@ -1223,6 +1225,19 @@ fn read_source_map(
         }
         Err(e) => mark_unreadable(r, script, &format!("it is malformed ({e})"), limitations),
     }
+}
+
+/// Count embedded `sourcesContent` entries across a source map and its nested inline `sections`.
+fn count_sources_with_content(root: &craft_anything_formats::sourcemap::SourceMap) -> usize {
+    let mut stack = vec![root];
+    let mut count = 0usize;
+    while let Some(map) = stack.pop() {
+        count = count.saturating_add(map.sources_content.iter().filter(|c| c.is_some()).count());
+        for (_, _, sub) in &map.sections {
+            stack.push(sub);
+        }
+    }
+    count
 }
 
 fn mark_unreadable(r: &mut SourceMapRef, script: &str, why: &str, limitations: &mut Vec<(String, String)>) {

@@ -12,7 +12,7 @@ const MAX_DEPTH: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Tok {
-    Ident(String),
+    Ident { name: String, verbatim: bool },
     Punct(char),
     Arrow,
     Lit,
@@ -146,18 +146,31 @@ fn tokenize(src: &str) -> Vec<T> {
             out.push(T { tok: Tok::Lit, line });
             continue;
         }
-        if c.is_alphanumeric() || c == '_' || c == '@' {
+        if c == '@' {
+            let next = at(i + 1);
+            if (next.is_alphanumeric() && !next.is_ascii_digit()) || next == '_' {
+                let line0 = line;
+                let start = i + 1;
+                i += 2;
+                while i < b.len() && (at(i).is_alphanumeric() || at(i) == '_') {
+                    i += 1;
+                }
+                let word: String = b.get(start..i).map(|s| s.iter().collect()).unwrap_or_default();
+                out.push(T { tok: Tok::Ident { name: word, verbatim: true }, line: line0 });
+                continue;
+            }
+        }
+        if c.is_alphanumeric() || c == '_' {
             let start = i;
             i += 1;
             while i < b.len() && (at(i).is_alphanumeric() || at(i) == '_') {
                 i += 1;
             }
             let word: String = b.get(start..i).map(|s| s.iter().collect()).unwrap_or_default();
-            let word = word.trim_start_matches('@').to_string();
             if word.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
                 out.push(T { tok: Tok::Lit, line });
             } else {
-                out.push(T { tok: Tok::Ident(word), line });
+                out.push(T { tok: Tok::Ident { name: word, verbatim: false }, line });
             }
             continue;
         }
@@ -244,9 +257,18 @@ const MODIFIERS: &[&str] = &[
 ];
 const TYPE_KW: &[&str] = &["class", "struct", "interface", "enum", "record", "delegate"];
 
+/// Identifier text of `t`, whether written plain (`foo`) or verbatim (`@class`).
 fn ident(t: &T) -> Option<&str> {
     match &t.tok {
-        Tok::Ident(s) => Some(s),
+        Tok::Ident { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+/// Non-verbatim identifier text of `t`, used when matching C# keywords and modifiers.
+fn kw(t: &T) -> Option<&str> {
+    match &t.tok {
+        Tok::Ident { name, verbatim: false } => Some(name),
         _ => None,
     }
 }
@@ -260,7 +282,7 @@ fn join(ts: &[T]) -> String {
     let mut s = String::new();
     for t in ts {
         match &t.tok {
-            Tok::Ident(w) => {
+            Tok::Ident { name: w, .. } => {
                 if s.chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     s.push(' ');
                 }
@@ -275,12 +297,12 @@ fn join(ts: &[T]) -> String {
     s
 }
 
-/// The CLR name of a C# operator, from the symbol after `operator`. Checked `++`, `--`, `*` and
-/// `/` have their own names; `+` and `-` depend on how many parameters they take, so the caller
-/// names those, and `implicit`/`explicit` conversions are named from the modifiers.
-fn operator_name(symbol: &str) -> &'static str {
-    if let Some(base) = symbol.strip_prefix("checked").map(str::trim_start) {
-        return match base {
+/// The CLR name of a C# operator, from the symbol after `operator` (and optional `checked` keyword).
+/// Checked `++`, `--`, `*` and `/` have their own names; `+` and `-` depend on how many parameters
+/// they take, so the caller names those, and `implicit`/`explicit` conversions are named from the modifiers.
+fn operator_name(symbol: &str, checked: bool) -> &'static str {
+    if checked {
+        return match symbol {
             "++" => "op_CheckedIncrement",
             "--" => "op_CheckedDecrement",
             "*" => "op_CheckedMultiply",
@@ -362,8 +384,8 @@ fn strip_prefix(ts: &[T]) -> (&[T], Vec<String>) {
                 Some(e) => i = e + 1,
                 None => break,
             },
-            Some(t) if ident(t).is_some_and(|w| MODIFIERS.contains(&w)) => {
-                mods.push(ident(t).unwrap_or_default().to_string());
+            Some(t) if kw(t).is_some_and(|w| MODIFIERS.contains(&w)) => {
+                mods.push(kw(t).unwrap_or_default().to_string());
                 i += 1;
             }
             _ => break,
@@ -381,7 +403,7 @@ fn param_type(p: &[T]) -> String {
     };
     let mut byref = false;
     let mut start = 0;
-    while let Some(w) = p.get(start).and_then(ident) {
+    while let Some(w) = p.get(start).and_then(kw) {
         match w {
             "ref" | "out" | "in" => {
                 byref = true;
@@ -457,26 +479,26 @@ impl Scanner {
     /// Parse a type declaration header into its name, kind, generic arity, and line number.
     fn type_decl(&self, h: &[T]) -> Option<(String, String, usize, u32)> {
         let paren = h.iter().position(|t| is_p(t, '(')).unwrap_or(h.len());
-        let kw = h.iter().take(paren).position(|t| ident(t).is_some_and(|w| TYPE_KW.contains(&w)))?;
+        let kw_at = h.iter().take(paren).position(|t| kw(t).is_some_and(|w| TYPE_KW.contains(&w)))?;
         // A declaration keyword cannot follow an assignment or arrow operator.
-        if h.iter().take(kw).any(|t| is_p(t, '=') || t.tok == Tok::Arrow) {
+        if h.iter().take(kw_at).any(|t| is_p(t, '=') || t.tok == Tok::Arrow) {
             return None;
         }
-        let kind = ident(h.get(kw)?)?;
+        let kind = kw(h.get(kw_at)?)?;
         if kind == "delegate" {
-            if h.get(kw + 1).is_some_and(|t| is_p(t, '*')) {
+            if h.get(kw_at + 1).is_some_and(|t| is_p(t, '*')) {
                 return None;
             }
-            let is_reserved = |w: &str| w == "delegate" || w == "ref" || w == "void" || MODIFIERS.contains(&w) || TYPE_KW.contains(&w);
+            let is_reserved = |tok: &T| kw(tok).is_some_and(|w| w == "delegate" || w == "ref" || w == "void" || MODIFIERS.contains(&w) || TYPE_KW.contains(&w));
             let mut target = None;
-            for p in (kw + 1)..h.len() {
+            for p in (kw_at + 1)..h.len() {
                 if !is_p(&h[p], '(') {
                     continue;
                 }
-                if p > kw + 1 && is_p(&h[p - 1], '>') {
+                if p > kw_at + 1 && is_p(&h[p - 1], '>') {
                     let mut depth = 0i32;
                     let mut open_lt = None;
-                    for i in (kw + 1..p).rev() {
+                    for i in (kw_at + 1..p).rev() {
                         let t = &h[i];
                         if is_p(t, '>') {
                             depth += 1;
@@ -489,10 +511,10 @@ impl Scanner {
                         }
                     }
                     if let Some(lt) = open_lt
-                        && lt > kw + 1
+                        && lt > kw_at + 1
                         && let Some(name_tok) = h.get(lt - 1)
                         && let Some(name) = ident(name_tok)
-                        && !is_reserved(name)
+                        && !is_reserved(name_tok)
                     {
                         let arity = split_commas(h.get(lt + 1..p - 1).unwrap_or(&[])).len();
                         target = Some((name.to_string(), arity, name_tok.line));
@@ -500,7 +522,7 @@ impl Scanner {
                     }
                 } else if let Some(name_tok) = h.get(p - 1)
                     && let Some(name) = ident(name_tok)
-                    && !is_reserved(name)
+                    && !is_reserved(name_tok)
                 {
                     target = Some((name.to_string(), 0, name_tok.line));
                     break;
@@ -509,10 +531,10 @@ impl Scanner {
             let (name, arity, line) = target?;
             return Some((name, "delegate".into(), arity, line));
         }
-        let mut k = kw + 1;
+        let mut k = kw_at + 1;
         let mut kind = kind.to_string();
-        if kind == "record" && h.get(k).and_then(ident).is_some_and(|w| w == "struct" || w == "class") {
-            kind = format!("record {}", ident(h.get(k)?)?);
+        if kind == "record" && h.get(k).and_then(kw).is_some_and(|w| w == "struct" || w == "class") {
+            kind = format!("record {}", kw(h.get(k)?)?);
             k += 1;
         }
         let name = ident(h.get(k)?)?.to_string();
@@ -561,7 +583,7 @@ impl Scanner {
                 _ => {}
             }
         }
-        let op_at = rest.iter().position(|t| ident(t) == Some("operator"));
+        let op_at = rest.iter().position(|t| kw(t) == Some("operator"));
         if let Some(op) = op_at {
             let p = rest.iter().skip(op).position(|t| is_p(t, '(')).map(|x| x + op);
             let params: Vec<String> = p
@@ -569,15 +591,16 @@ impl Scanner {
                 .map(|(p, c)| split_commas(rest.get(p + 1..c).unwrap_or(&[])).into_iter().map(param_type).collect())
                 .unwrap_or_default();
             let ret = join(rest.get(..op).unwrap_or(&[]));
-            let symbol = p.and_then(|p| rest.get(op + 1..p)).map(join).unwrap_or_default();
-            let checked = symbol.strip_prefix("checked").map(str::trim_start);
+            let op_tokens = p.and_then(|p| rest.get(op + 1..p)).unwrap_or(&[]);
+            let is_checked = op_tokens.first().is_some_and(|t| kw(t) == Some("checked"));
+            let symbol = join(if is_checked { op_tokens.get(1..).unwrap_or(&[]) } else { op_tokens });
             let conversion = mods.iter().any(|m| matches!(m.as_str(), "implicit" | "explicit"));
             let name = if mods.iter().any(|m| m.as_str() == "implicit") {
                 "op_Implicit".to_string()
             } else if mods.iter().any(|m| m.as_str() == "explicit") {
-                if checked.is_some() { "op_CheckedExplicit".to_string() } else { "op_Explicit".to_string() }
+                if is_checked { "op_CheckedExplicit".to_string() } else { "op_Explicit".to_string() }
             } else {
-                match (checked.unwrap_or(&symbol), checked.is_some(), params.len()) {
+                match (symbol.as_str(), is_checked, params.len()) {
                     ("+", false, 1) => "op_UnaryPlus".to_string(),
                     ("+", false, _) => "op_Addition".to_string(),
                     // Checked unary `+` isn't a C# operator: only the binary form is checked.
@@ -587,10 +610,10 @@ impl Scanner {
                     ("-", false, _) => "op_Subtraction".to_string(),
                     ("-", true, 1) => "op_CheckedUnaryNegation".to_string(),
                     ("-", true, _) => "op_CheckedSubtraction".to_string(),
-                    _ => operator_name(&symbol).to_string(),
+                    _ => operator_name(&symbol, is_checked).to_string(),
                 }
             };
-            let ty = if conversion { checked.unwrap_or(&symbol).to_string() } else { ret };
+            let ty = if conversion { symbol } else { ret };
             self.push(CsMember { kind: "method", type_name: full, name, generic_arity: 0, params, ty, line });
             return;
         }
@@ -636,10 +659,10 @@ impl Scanner {
             return;
         }
         let decl = rest.get(..eq).unwrap_or(&[]);
-        let is_event = decl.first().and_then(ident) == Some("event");
+        let is_event = decl.first().and_then(kw) == Some("event");
         let decl = if is_event { decl.get(1..).unwrap_or(&[]) } else { decl };
         // Indexers.
-        if let Some(ti) = decl.iter().position(|t| ident(t) == Some("this"))
+        if let Some(ti) = decl.iter().position(|t| kw(t) == Some("this"))
             && decl.get(ti + 1).is_some_and(|t| is_p(t, '['))
         {
             let close = matching(decl, ti + 1, '[', ']').unwrap_or(decl.len());
@@ -743,8 +766,9 @@ impl Scanner {
                         self.out.warnings.push("nesting too deep; the rest of the file was skipped".into());
                         break;
                     }
-                    if let Some(p) = h.iter().position(|x| ident(x) == Some("namespace")) {
-                        let name = join(h.get(p + 1..).unwrap_or(&[]));
+                    let (ns_head, _) = strip_prefix(&h);
+                    if ns_head.first().and_then(kw) == Some("namespace") {
+                        let name = join(ns_head.get(1..).unwrap_or(&[]));
                         self.scopes.push(Scope::Namespace(name));
                     } else if let Some((name, kind, arity, line)) = self.type_decl(&h) {
                         let prefix = self.prefix();
@@ -800,9 +824,10 @@ impl Scanner {
                 Tok::Punct(';') => {
                     let h = std::mem::take(&mut cur);
                     expr_depth = 0;
-                    if let Some(p) = h.iter().position(|x| ident(x) == Some("namespace")) {
+                    let (ns_head, _) = strip_prefix(&h);
+                    if ns_head.first().and_then(kw) == Some("namespace") {
                         if self.scopes.is_empty() {
-                            self.file_ns = join(h.get(p + 1..).unwrap_or(&[]));
+                            self.file_ns = join(ns_head.get(1..).unwrap_or(&[]));
                         }
                     } else if let Some((name, kind, arity, line)) = self.type_decl(&h) {
                         let prefix = self.prefix();

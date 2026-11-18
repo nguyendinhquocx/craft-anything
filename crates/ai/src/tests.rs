@@ -649,13 +649,31 @@ fn an_ais_model_is_changed() {
     let claude =
         BackendConfig { name: "Claude Code".into(), kind: BackendKind::AgentCli, model: "claude-code".into(), base_url: None, ssh_host: None, enabled: true };
     h.add_backend(claude, None).unwrap();
-    assert_eq!(h.model_choices("Claude Code").unwrap(), crate::anthropic::MODELS);
+    assert_eq!(
+        h.model_choices("Claude Code").unwrap(),
+        [crate::anthropic::CLAUDE_CODE_DEFAULT, "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+    );
     assert!(h.set_model("Claude Code", "claude-sonnet-5-5").unwrap());
     let claude = h.options().get("Claude Code").and_then(|o| o.cli_model.clone());
     assert_eq!(claude.as_deref(), Some("claude-sonnet-5-5"), "the CLI is asked for it; the agent stays Claude Code");
     assert_eq!(h.backends().into_iter().find(|b| b.name == "Claude Code").unwrap().model, "claude-code");
+    // A custom model id the catalogue doesn't list, as a person's Claude Code settings may name.
+    assert!(h.set_model("Claude Code", "my-custom-model").unwrap());
+    assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()).as_deref(), Some("my-custom-model"));
+    // "default" clears the choice: no --model is passed, so Claude Code uses its own settings.
+    assert!(h.set_model("Claude Code", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Claude Code").and_then(|o| o.cli_model.clone()), None);
     assert!(!h.set_model("Nobody", "m").unwrap());
     assert!(h.set_model("Box", " ").is_err());
+
+    // The Claude Code adapter is also registered as `claude`; the default must clear for that id
+    // too, or a run would pass `--model default` (#470 review).
+    let alias = BackendConfig { name: "Claude".into(), kind: BackendKind::AgentCli, model: "claude".into(), base_url: None, ssh_host: None, enabled: true };
+    h.add_backend(alias, None).unwrap();
+    assert!(h.set_model("Claude", "my-custom-model").unwrap());
+    assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.as_deref()), Some("my-custom-model"));
+    assert!(h.set_model("Claude", crate::anthropic::CLAUDE_CODE_DEFAULT).unwrap());
+    assert_eq!(h.options().get("Claude").and_then(|o| o.cli_model.clone()), None);
 }
 
 /// Every Claude effort level can be chosen for the Claude API and Claude Code, and only for them.
@@ -679,6 +697,42 @@ fn a_claude_ais_effort_is_changed() {
     assert_eq!(effort(&h, "Codex"), None, "an agent that doesn't take Claude's levels");
     assert!(h.set_effort("Codex", Some(Effort::Max)).is_err());
     assert!(!h.set_effort("Nobody", Some(Effort::Low)).unwrap());
+}
+
+/// #1813: an OpenAI-style API is sent a reasoning level only once the person chooses one, and
+/// only one of OpenAI's levels; OpenRouter gets it in its own field.
+#[test]
+fn an_openai_style_ais_effort_is_sent_only_once_chosen() {
+    use crate::model::{Msg, Stop, TurnRequest};
+    let reply = || (200, "text/event-stream", chat_sse(&[json!({"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]})]));
+    for (kind, field) in [(BackendKind::OpenaiCompatible, "/reasoning_effort"), (BackendKind::Openrouter, "/reasoning/effort")] {
+        let (h, _d) = hub();
+        let (url, seen) = mock(vec![reply(), reply()]);
+        let config = BackendConfig { name: "Box".into(), kind, model: "m".into(), base_url: Some(url), ssh_host: None, enabled: true };
+        h.add_backend(config, Some("k".into())).unwrap();
+        let ask = |h: &AiHub| {
+            let mut slot = h.build_model(&h.entry("Box").unwrap()).unwrap();
+            let messages = [Msg::user_text("hi")];
+            let request = TurnRequest { system: "S", messages: &messages, tools: &[], effort: prompt::choose_effort(slot.effort), max_tokens: 100 };
+            slot.model.turn(&request, &mut |_| {}, &Stop::default()).unwrap();
+        };
+        let effort = |h: &AiHub| crate::effort_in_use(&h.entry("Box").unwrap().config, h.options().get("Box"));
+        assert_eq!(effort(&h), None, "nothing is sent until it's chosen");
+        ask(&h);
+        assert!(h.set_effort("Box", Some(Effort::Max)).is_err(), "max isn't one of OpenAI's levels");
+        assert!(h.set_effort("Box", Some(Effort::Minimal)).unwrap());
+        assert_eq!(effort(&h), Some(Effort::Minimal));
+        ask(&h);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].body.get("reasoning_effort").is_none() && seen[0].body.get("reasoning").is_none(), "{}", seen[0].body);
+        assert_eq!(seen[1].body.pointer(field), Some(&json!("minimal")), "{}", seen[1].body);
+        drop(seen);
+        assert!(h.set_effort("Box", None).unwrap());
+        assert_eq!(effort(&h), None);
+    }
+    // Gemini is offered only the levels every Gemini model takes.
+    let gemini = BackendConfig { name: "G".into(), kind: BackendKind::Gemini, model: "gemini-2.5-pro".into(), base_url: None, ssh_host: None, enabled: true };
+    assert_eq!(crate::effort_levels(&gemini), [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]);
 }
 
 #[test]
@@ -872,7 +926,8 @@ pub(crate) fn serve_routes(routes: &'static [(&'static str, &'static str)]) -> S
 
 /// #1434: FastFlowLM's `/models` lists every model it can download; taking the first started a
 /// 5.5 GB download and unloaded the model in use. A chat model the server says is loaded comes
-/// first; without `/api/ps`, or with nothing loaded, the first chat model listed is still used.
+/// first; without `/api/ps`, or with nothing loaded, the person chooses between several chat
+/// models, and the only one is used.
 #[test]
 fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     let (h, _d) = hub();
@@ -884,9 +939,21 @@ fn a_server_added_without_a_model_gets_the_one_it_has_loaded() {
     assert_eq!(h.add_server("Npu", &flm, None, None).unwrap(), "qwen3.8-mtp-uncensored:27b", "the loaded chat model, not an embedding one");
     assert_eq!(h.add_server("Named", &flm, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "a named model still wins");
     let idle = serve_routes(&[("/v1/models", CATALOGUE), ("/api/ps", r#"{"models":[]}"#)]);
-    assert_eq!(h.add_server("Idle", &idle, None, None).unwrap(), "deepseek-r1:8b", "nothing loaded: the list's first");
     let no_ps = serve_routes(&[("/v1/models", CATALOGUE)]);
-    assert_eq!(h.add_server("Studio", &no_ps, None, None).unwrap(), "deepseek-r1:8b", "no /api/ps: the list's first");
+    for (name, url) in [("Idle", &idle), ("Studio", &no_ps)] {
+        let e = h.add_server(name, url, None, None).unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadInput, "{name}: {e:?}");
+        assert_eq!(models_to_choose(&e), ["deepseek-r1:8b", "gemma3:1b", "qwen3.8-mtp-uncensored:27b"], "{name}");
+        assert!(e.message.contains("lists 3 chat models"), "{e:?}");
+        assert!(e.remediation.as_deref().is_some_and(|r| r.contains("deepseek-r1:8b, gemma3:1b")), "{e:?}");
+    }
+    assert_eq!(h.add_server("Studio", &no_ps, Some("gemma3:1b"), None).unwrap(), "gemma3:1b", "the chosen one is added");
+    // One chat model beside an embedding one: nothing to choose.
+    let one = serve_routes(&[("/v1/models", r#"{"object":"list","data":[{"id":"nomic-embed-text"},{"id":"qwen3:8b"}]}"#)]);
+    assert_eq!(h.add_server("One", &one, None, None).unwrap(), "qwen3:8b");
+    assert!(models_to_choose(&ToolError::invalid("other")).is_empty(), "other errors offer nothing");
+    let names: Vec<_> = h.backends().into_iter().map(|b| b.name).collect();
+    assert!(!names.iter().any(|n| n == "Idle"), "nothing added while a choice is owed: {names:?}");
 }
 
 /// #54, #98: a server on another computer is added by its address, with a model that can chat
@@ -1135,6 +1202,53 @@ fn anthropic_refusal_and_http_errors() {
         ev.iter().any(|e| matches!(e, AgentEvent::Error { message, remediation: Some(r), .. } if message.contains("invalid x-api-key") && r.contains("key"))),
         "{ev:?}"
     );
+}
+
+/// A service, or a proxy in front of it, can repeat the key or words from the request in its
+/// error: in a JSON error's message, type or code, in a plain-text body, or in a stream's error
+/// event. None of it reaches the failure log, in the error, the service's code or the advice. The
+/// marker is written like an error code (lower-case letters and an underscore), so only a list of
+/// known codes keeps it out; a known code is still kept (R5.5).
+#[test]
+fn a_failure_log_leaves_out_what_the_service_repeats_of_the_key_and_the_request() {
+    let key = "sk-test-reflected-key";
+    let marker = "quokka_umbrella";
+    let reflected = format!("key {key} may not ask about the {marker}");
+    let stream_error = |kind: &str| {
+        sse(&[
+            json!({"type":"message_start","message":{"model":"claude-opus-5-5","usage":{"input_tokens":5}}}),
+            json!({"type":"error","error":{"type":kind,"message":reflected}}),
+        ])
+    };
+    let (url, _seen) = mock(vec![
+        (401, "application/json", json!({"type":"error","error":{"type":marker,"message":reflected}}).to_string()),
+        (400, "application/json", json!({"error":{"code":marker,"message":reflected}}).to_string()),
+        (400, "text/plain", format!("Rejected by the proxy: {reflected}")),
+        (200, "text/event-stream", stream_error(marker)),
+        (200, "text/event-stream", stream_error("invalid_request_error")),
+    ]);
+    let (h, _d) = hub();
+    add(&h, "Claude", BackendKind::Anthropic, &url, Some(key));
+    let mut c = h.start(Some("Claude"), false).unwrap();
+    let unknown = "The service's error code: not a known one";
+    let expected: [&[&str]; 5] = [
+        &["Error: NoPermission", "HTTP status: 401", unknown, "Diagnosis: The API key was rejected"],
+        &["Error: BadInput", "HTTP status: 400", unknown],
+        &["Error: BadInput", "HTTP status: 400"],
+        &["Error: ProgramFailed", unknown, "Diagnosis: Try again"],
+        &["Error: ProgramFailed", "The service's error code: invalid_request_error"],
+    ];
+    for (n, parts) in expected.iter().enumerate() {
+        let ev = run(&mut c, &format!("a question about the {marker}, take {n}"));
+        let log = ev.iter().find_map(|e| if let AgentEvent::Error { log, .. } = e { log.clone() } else { None });
+        let text = std::fs::read_to_string(log.unwrap_or_else(|| panic!("no log for take {n}: {ev:?}"))).unwrap();
+        for hidden in [key, marker, "may not ask"] {
+            assert!(!text.contains(hidden), "take {n}, {hidden}: {text}");
+        }
+        for part in *parts {
+            assert!(text.contains(part), "take {n}, {part}: {text}");
+        }
+    }
 }
 
 #[test]

@@ -192,3 +192,28 @@ fn an_untrusted_certificate_is_still_refused() {
     assert!(download_with_agent(&https.url, &mut Vec::new(), 4096, None, &|_, _| {}, &agent).is_err());
     assert_eq!(https.seen.load(Ordering::SeqCst), 0);
 }
+
+/// Windows' manual proxy setting, as the registry keeps it (#1827).
+#[test]
+fn a_manual_system_proxy_is_read_as_windows_writes_it() {
+    let uri = |s: &str| s.parse::<ureq::http::Uri>().unwrap();
+    let addr = |p: ureq::Proxy| format!("{}:{}", p.host(), p.port());
+    assert_eq!(addr(manual_proxy("127.0.0.1:10808", "").unwrap()), "127.0.0.1:10808");
+    assert_eq!(addr(manual_proxy("http=h1:80;https=h2:8443;socks=s:1080", "").unwrap()), "h2:8443", "the HTTPS entry");
+    assert_eq!(addr(manual_proxy("ftp=f:21;http=h1:80", "").unwrap()), "h1:80", "else the HTTP one");
+    assert_eq!(addr(manual_proxy("[::1]:3128", "").unwrap()), "[::1]:3128");
+    for refused in ["", "socks=s:1080", "https=bad;http=h1:80", "user:pw@h:80", "h", "fe80::1", "http://h:80/path"] {
+        assert!(manual_proxy(refused, "").is_none(), "{refused}");
+    }
+
+    let p = manual_proxy("proxy:8080", "*.corp.example;intranet;<local>").unwrap();
+    for direct in ["https://localhost/x", "https://127.0.0.1/x", "https://[::1]/x", "https://a.corp.example/x", "https://intranet/x"] {
+        assert!(p.is_no_proxy(&uri(direct)), "{direct} goes direct");
+    }
+    assert!(!p.is_no_proxy(&uri("https://github.com/x")), "a download goes through the proxy");
+
+    // Rules ureq can't match as Windows does are left out, not read as something else.
+    let p = manual_proxy("proxy:8080", "*github*;10.*.0.1;github.*").unwrap();
+    assert!(!p.is_no_proxy(&uri("https://api.github.com/x")) && !p.is_no_proxy(&uri("https://10.1.0.1/x")));
+    assert!(p.is_no_proxy(&uri("https://github.com/x")), "a single `*` at the end still works");
+}

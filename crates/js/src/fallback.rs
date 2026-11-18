@@ -20,23 +20,28 @@ pub(crate) fn facts_from_tokens(tokens: &[Token<'_>], lines: &LineIndex) -> Modu
         api_token(&mut f, &sig, i, off, line);
         match (t.kind, t.text) {
             (TokKind::Ident, "require" | "import") if at(i + 1) == Some((TokKind::Punct, "(")) => {
+                let dynamic = t.text == "import";
+                if dynamic && i.checked_sub(1).and_then(at).is_some_and(|p| matches!(p, (TokKind::Punct, "." | "?."))) {
+                    continue;
+                }
+                let after_specifier = at(i + 3);
                 if let Some((TokKind::Str, s)) = at(i + 2)
-                    && at(i + 3) == Some((TokKind::Punct, ")"))
-                    && f.imports.len() < crate::facts::MAX_LIST
+                    && (after_specifier == Some((TokKind::Punct, ")")) || (dynamic && after_specifier == Some((TokKind::Punct, ","))))
                 {
-                    let kind = if t.text == "require" { "require" } else { "dynamic-import" };
-                    let spec = string_value(s);
-                    if spec.ends_with(".node") {
-                        push_unique(&mut f.native_modules, spec.clone(), 1000);
-                    }
-                    f.imports.push(ImportRef { kind: kind.into(), specifier: spec, literal: true, names: Vec::new(), line, offset: off });
+                    let kind = if dynamic { "dynamic-import" } else { "require" };
+                    add_import(&mut f, kind, string_value(s), line, off);
+                }
+            }
+            (TokKind::Ident, "import")
+                if matches!(at(i + 1), Some((TokKind::Str, _))) && (i == 0 || !matches!(at(i - 1), Some((TokKind::Punct, "." | "?.")))) =>
+            {
+                if let Some((TokKind::Str, s)) = at(i + 1) {
+                    add_import(&mut f, "import", string_value(s), line, off);
                 }
             }
             (TokKind::Ident, "from") => {
-                if let Some((TokKind::Str, s)) = at(i + 1)
-                    && f.imports.len() < crate::facts::MAX_LIST
-                {
-                    f.imports.push(ImportRef { kind: "import".into(), specifier: string_value(s), literal: true, names: Vec::new(), line, offset: off });
+                if let Some((TokKind::Str, s)) = at(i + 1) {
+                    add_import(&mut f, "import", string_value(s), line, off);
                 }
             }
             (TokKind::Ident, "fetch") if at(i + 1) == Some((TokKind::Punct, "(")) => {
@@ -142,6 +147,11 @@ fn api_token(f: &mut ModuleFacts, sig: &[&Token<'_>], i: usize, off: u32, line: 
         }
         TokKind::Ident => {
             let Some(kind) = api_ops::client_hook(t.text) else { return };
+            // A hook property can be saved or passed around without calling the procedure.
+            let called = at(i + 1) == Some((TokKind::Punct, "(")) || (at(i + 1) == Some((TokKind::Punct, "?.")) && at(i + 2) == Some((TokKind::Punct, "(")));
+            if !called {
+                return;
+            }
             // Back along `a.b.c.useQuery`, as far as plain names go.
             let mut path: Vec<&str> = Vec::new();
             let mut j = i;
@@ -181,6 +191,19 @@ fn api_token(f: &mut ModuleFacts, sig: &[&Token<'_>], i: usize, off: u32, line: 
 }
 
 /// Note that `list` was cut at a limit, once.
+/// Record an import as the syntax-tree pass does: past the list cap it is dropped and `imports`
+/// is marked truncated, and a `.node` specifier is also a native module.
+fn add_import(f: &mut ModuleFacts, kind: &str, specifier: String, line: u32, offset: u32) {
+    if f.imports.len() >= crate::facts::MAX_LIST {
+        mark_truncated(f, "imports");
+        return;
+    }
+    if specifier.ends_with(".node") {
+        push_unique(&mut f.native_modules, specifier.clone(), 1000);
+    }
+    f.imports.push(ImportRef { kind: kind.into(), specifier, literal: true, names: Vec::new(), line, offset });
+}
+
 fn mark_truncated(f: &mut ModuleFacts, list: &str) {
     if !f.truncated.iter().any(|x| x == list) {
         f.truncated.push(list.into());

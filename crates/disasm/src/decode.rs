@@ -1034,6 +1034,7 @@ fn decode_a32(mode: Mode, bytes: &[u8], addr: u64, fmt: bool) -> Option<Insn> {
     let mut writes = Vec::new();
     let mut pops_pc = false;
     let mut reg_ops: Vec<u8> = Vec::new();
+    let mut reg_list: Vec<u8> = Vec::new();
     // A memory operand no C statement says whole (write-back, a subtracted or shifted index): the
     // lifter shows the instruction as written rather than a wrong expression (#277).
     let mut exact = true;
@@ -1086,8 +1087,20 @@ fn decode_a32(mode: Mode, bytes: &[u8], addr: u64, fmt: bool) -> Option<Insn> {
                 target = Some(t);
                 ops.push(Op::Addr(t));
             }
-            Operand::Reg(r) | Operand::RegWBack(r, _) | Operand::RegDeref(r) => {
+            Operand::Reg(r) => {
                 reg_ops.push(r.number());
+                ops.push(Op::Reg(format!("r{}", r.number())));
+            }
+            Operand::RegDeref(r) => {
+                push_unique(&mut reads, format!("r{}", r.number()));
+                ops.push(Op::Reg(format!("r{}", r.number())));
+            }
+            Operand::RegWBack(r, wb) => {
+                let name = format!("r{}", r.number());
+                push_unique(&mut reads, name.clone());
+                if wb {
+                    push_unique(&mut writes, name);
+                }
                 ops.push(Op::Reg(format!("r{}", r.number())));
             }
             Operand::RegList(list) => {
@@ -1096,7 +1109,7 @@ fn decode_a32(mode: Mode, bytes: &[u8], addr: u64, fmt: bool) -> Option<Insn> {
                 }
                 for i in 0..16u8 {
                     if list & (1 << i) != 0 {
-                        reg_ops.push(i);
+                        reg_list.push(i);
                     }
                 }
             }
@@ -1152,6 +1165,20 @@ fn decode_a32(mode: Mode, bytes: &[u8], addr: u64, fmt: bool) -> Option<Insn> {
         Opcode::BL | Opcode::BLX => Kind::Call,
         _ => Kind::Other,
     };
+    let list_writes = matches!(inst.opcode, Opcode::POP | Opcode::LDM(..));
+    for r in reg_list {
+        let n = format!("r{r}");
+        if list_writes {
+            push_unique(&mut writes, n);
+        } else {
+            push_unique(&mut reads, n);
+        }
+    }
+    if matches!(inst.opcode, Opcode::POP | Opcode::PUSH) {
+        // Thumb `pop`/`push` omit `sp` from `inst.operands`, but both read and update `r13`.
+        push_unique(&mut reads, "r13".into());
+        push_unique(&mut writes, "r13".into());
+    }
     for (i, r) in reg_ops.iter().enumerate() {
         let n = format!("r{r}");
         if i == 0 && !matches!(kind, Kind::Store | Kind::Cmp | Kind::Test | Kind::Push | Kind::Branch | Kind::Call) {

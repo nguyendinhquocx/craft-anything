@@ -149,6 +149,7 @@ Couldn't attach the pictures:	画像を添付できませんでした:
 Couldn't look through that folder.	そのフォルダを調べられませんでした。
 Couldn't open it.	開けませんでした。
 Couldn't open the folder.	フォルダを開けませんでした。
+Couldn't save your settings.	設定を保存できませんでした。
 Couldn't start it.	起動できませんでした。
 Coverage unknown	確認範囲は不明
 Craft Anything can't build with {engine}, so Unity is the closest match.	Craft Anything は {engine} でビルドできないため、最も近い選択肢として Unity を使います。
@@ -947,3 +948,6 @@ yesterday	昨日
 … {n} more	… ほか {n} 件
 … {n} older	… 古いもの {n} 件
 Connecting to {name}… {seconds} s	{name} に接続中… {seconds} 秒
+Some shared files could not be hard-linked and were copied instead ({size}).	共有ファイルの一部はハードリンクできず、コピーしました（{size}）。
+This server lists several chat models. Choose one:	このサーバーには複数のチャットモデルがあります。1 つ選んでください:
+Choose a model	モデルを選ぶ
