@@ -150,54 +150,84 @@ pub struct PlannedFile {
     pub reason: Option<String>,
 }
 
+/// Sanitize one URL host or path segment for relative disk output, stripping leading and trailing
+/// dots (including dots left at the 100-char cut) so Windows does not fold segments onto peers.
 fn clean_segment(s: &str) -> String {
     let c: String = s.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | '+') { c } else { '_' }).take(100).collect();
-    let c = c.trim_start_matches('.').to_string();
+    let c = c.trim_matches('.').to_string();
     if c.is_empty() { "_".into() } else { c }
+}
+
+/// Whether `file` already ends with a `.js`, `.mjs`, or `.cjs` extension (case-insensitively).
+fn has_script_ext(file: &str) -> bool {
+    file.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && !stem.ends_with('/') && (ext.eq_ignore_ascii_case("js") || ext.eq_ignore_ascii_case("mjs") || ext.eq_ignore_ascii_case("cjs"))
+    })
+}
+
+struct LayoutCandidate {
+    sha: String,
+    rel: String,
+    hashed_base: String,
+    reason: Option<String>,
 }
 
 /// Plan where each script goes. Same URL path seen twice (query variants, different content)
 /// gets a content-hash suffix and a stated reason.
 pub fn plan_layout(scripts: &[CapturedScript]) -> Vec<PlannedFile> {
-    let mut used: BTreeSet<String> = BTreeSet::new();
-    let mut out = Vec::new();
-    for (i, s) in scripts.iter().enumerate() {
-        let sha = sha256_hex(s.text.as_bytes());
-        let short = sha.get(..10).unwrap_or(&sha).to_string();
-        let (host, path, query) = match s.url.split_once("://") {
-            Some((scheme, rest)) if !rest.is_empty() => {
-                let rest = rest.split('#').next().unwrap_or(rest);
-                let (hp, q) = rest.split_once('?').map_or((rest, None), |(a, b)| (a, Some(b)));
-                let (h, p) = hp.split_once('/').unwrap_or((hp, ""));
-                let h = h.rsplit('@').next().unwrap_or(h);
-                (if scheme == "file" { "local".to_string() } else { clean_segment(h) }, p.to_string(), q.is_some())
+    use craft_anything_js::recover::{ancestor_dir_keys, module_path_key};
+
+    let candidates: Vec<LayoutCandidate> = scripts
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let sha = sha256_hex(s.text.as_bytes());
+            let short = sha.get(..10).unwrap_or(&sha).to_string();
+            let (host, path, query) = match s.url.split_once("://") {
+                Some((scheme, rest)) if !rest.is_empty() => {
+                    let rest = rest.split('#').next().unwrap_or(rest);
+                    let (hp, q) = rest.split_once('?').map_or((rest, None), |(a, b)| (a, Some(b)));
+                    let (h, p) = hp.split_once('/').unwrap_or((hp, ""));
+                    let h = h.rsplit('@').next().unwrap_or(h);
+                    (if scheme == "file" { "local".to_string() } else { clean_segment(h) }, p.to_string(), q.is_some())
+                }
+                _ => ("inline".to_string(), format!("script-{i}.js"), false),
+            };
+            let mut segs: Vec<String> = path.split('/').filter(|p| !p.is_empty() && *p != "." && *p != "..").map(clean_segment).take(24).collect();
+            if segs.is_empty() {
+                segs.push("index.js".into());
             }
-            _ => ("inline".to_string(), format!("script-{i}.js"), false),
-        };
-        let mut segs: Vec<String> = path.split('/').filter(|p| !p.is_empty() && *p != "." && *p != "..").map(clean_segment).take(24).collect();
-        if segs.is_empty() {
-            segs.push("index.js".into());
-        }
-        let mut file = segs.join("/");
-        if !file.ends_with(".js") && !file.ends_with(".mjs") && !file.ends_with(".cjs") {
-            file.push_str(".js");
-        }
-        let mut rel = format!("files/{host}/{file}");
-        let mut reason = None;
-        if query {
-            rel = with_suffix(&rel, &short);
-            reason = Some("URL has a query string; named by content hash to keep variants apart".to_string());
-        }
-        if used.contains(&rel) {
-            rel = with_suffix(&rel, &short);
+            let mut file = segs.join("/");
+            if !has_script_ext(&file) {
+                file.push_str(".js");
+            }
+            let mut rel = format!("files/{host}/{file}");
+            let mut reason = None;
+            let hashed_base = if query {
+                rel = with_suffix(&rel, &short);
+                reason = Some("URL has a query string; named by content hash to keep variants apart".to_string());
+                rel.clone()
+            } else {
+                with_suffix(&rel, &short)
+            };
+            LayoutCandidate { sha, rel, hashed_base, reason }
+        })
+        .collect();
+
+    let mut used: BTreeSet<String> = candidates.iter().flat_map(|c| ancestor_dir_keys(&c.rel)).collect();
+    let mut out = Vec::new();
+    for (s, c) in scripts.iter().zip(candidates) {
+        let LayoutCandidate { sha, mut rel, hashed_base, mut reason } = c;
+        if used.contains(&module_path_key(&rel)) {
+            rel = hashed_base.clone();
             reason = Some("another script already used this path; named by content hash".to_string());
-            let mut n = 2;
-            while used.contains(&rel) && n < 10_000 {
-                rel = with_suffix(&rel, &n.to_string());
+            let mut n = 2usize;
+            while used.contains(&module_path_key(&rel)) {
+                rel = with_suffix(&hashed_base, &n.to_string());
                 n += 1;
             }
         }
-        used.insert(rel.clone());
+        used.insert(module_path_key(&rel));
         out.push(PlannedFile { url: s.url.clone(), path: rel, sha256: sha, bytes: s.text.len(), reason });
     }
     out

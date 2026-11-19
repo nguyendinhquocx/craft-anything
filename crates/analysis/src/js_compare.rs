@@ -216,6 +216,20 @@ fn str_field<'a>(v: &'a [Value], key: &'a str) -> impl Iterator<Item = &'a str> 
     v.iter().filter_map(move |x| x.get(key).and_then(Value::as_str))
 }
 
+/// Aggregate observed vendor versions by package name without letting trailing empty markers or
+/// duplicate entries erase known versions.
+fn collect_vendors(vendors: &[Value]) -> BTreeMap<String, String> {
+    let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for v in vendors {
+        let Some(name) = v.get("name").and_then(Value::as_str) else { continue };
+        let versions = by_name.entry(name.to_string()).or_default();
+        if let Some(version) = v.get("version").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            versions.insert(version.to_string());
+        }
+    }
+    by_name.into_iter().map(|(name, versions)| (name, versions.into_iter().collect::<Vec<_>>().join(", "))).collect()
+}
+
 /// The full version comparison.
 pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
     let pkg = |g: &AppGraph, k: &str| g.package.as_ref().and_then(|p| p.get(k)).cloned().unwrap_or(Value::Null);
@@ -244,13 +258,7 @@ pub fn compare_versions(l: &AppGraph, r: &AppGraph) -> Value {
             })
             .collect::<BTreeSet<_>>()
     };
-    let vendors = |g: &AppGraph| {
-        g.vendors
-            .iter()
-            .filter_map(|v| Some((v.get("name")?.as_str()?.to_string(), v.get("version").and_then(Value::as_str).unwrap_or("").to_string())))
-            .collect::<BTreeMap<_, _>>()
-    };
-    let (lv, rv) = (vendors(l), vendors(r));
+    let (lv, rv) = (collect_vendors(&l.vendors), collect_vendors(&r.vendors));
     let vendor_changes: Vec<Value> = lv
         .iter()
         .filter_map(|(n, v)| rv.get(n).filter(|w| *w != v).map(|w| json!({"name": n, "from": v, "to": w})))

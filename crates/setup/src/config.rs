@@ -86,8 +86,7 @@ pub fn remove_entry(client: &Client, text: &str) -> Result<Option<String>, Strin
         }
         Format::Yaml => {
             let table = client.table.first().copied().unwrap_or("mcp_servers");
-            yaml::parse(text)?;
-            Ok(yaml::remove(text, table, SERVER_NAME))
+            yaml::try_remove(text, table, SERVER_NAME)
         }
         Format::Manual => Ok(None),
     }

@@ -72,8 +72,8 @@ pub(crate) struct Redactor {
 
 /// Percent-encode `s`; when `form` is true, use WHATWG `application/x-www-form-urlencoded` rules
 /// (space becomes `+`, `*` stays literal, `~` is percent-encoded); otherwise keep `~` and encode `*`.
-fn encode_query(s: &str, form: bool, upper_hex: bool) -> String {
-    let mut out = String::new();
+pub fn encode_query(s: &str, form: bool, upper_hex: bool) -> String {
+    let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if form && b == b' ' {
             out.push('+');
@@ -94,30 +94,58 @@ fn percent_encode(s: &str) -> String {
 }
 
 /// True when `haystack` contains `needle` under ASCII case-insensitive comparison.
-pub(crate) fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+pub fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
     !needle.is_empty() && haystack.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// Replace non-overlapping ASCII case-insensitive occurrences of `needles` (longest first) with `replacement`.
-pub(crate) fn replace_needles_with(s: &str, needles: &[String], replacement: &str) -> (String, u64) {
+/// Replace ASCII case-insensitive occurrences of `needles` in `s` with `replacement`, merging
+/// overlapping matched spans so an earlier shorter match cannot expose a longer secret's suffix.
+pub fn replace_needles_with(s: &str, needles: &[String], replacement: &str) -> (String, u64) {
+    if needles.is_empty() || !needles.iter().any(|n| contains_ascii_ci(s, n)) {
+        return (s.to_string(), 0);
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (start, _) in s.char_indices() {
+        let Some(tail) = s.get(start..) else { continue };
+        let max_len = needles
+            .iter()
+            .filter(|n| {
+                !n.is_empty()
+                    && tail.len() >= n.len()
+                    && s.is_char_boundary(start + n.len())
+                    && tail.as_bytes().get(..n.len()).is_some_and(|w| w.eq_ignore_ascii_case(n.as_bytes()))
+            })
+            .map(String::len)
+            .max();
+        if let Some(len) = max_len {
+            let end = start + len;
+            if let Some((_, prev_end)) = spans.last_mut()
+                && start < *prev_end
+            {
+                *prev_end = (*prev_end).max(end);
+            } else {
+                spans.push((start, end));
+            }
+        }
+    }
     let mut out = String::with_capacity(s.len());
     let mut count = 0u64;
-    let mut i = 0usize;
-    while let Some(tail) = s.get(i..) {
-        let Some(ch) = tail.chars().next() else { break };
-        if let Some(hit) = needles.iter().find(|n| !n.is_empty() && tail.as_bytes().get(..n.len()).is_some_and(|w| w.eq_ignore_ascii_case(n.as_bytes()))) {
-            out.push_str(replacement);
-            count = count.saturating_add(1);
-            i += hit.len();
-        } else {
-            out.push(ch);
-            i += ch.len_utf8();
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        if let Some(prefix) = s.get(cursor..start) {
+            out.push_str(prefix);
         }
+        out.push_str(replacement);
+        count = count.saturating_add(1);
+        cursor = end;
+    }
+    if let Some(rest) = s.get(cursor..) {
+        out.push_str(rest);
     }
     (out, count)
 }
 
-/// Replace non-overlapping ASCII case-insensitive occurrences of `needles` (longest first) with `[redacted]`.
+/// Replace ASCII case-insensitive occurrences of `needles` (merging overlapping matches) with `[redacted]`.
 fn replace_needles(s: &str, needles: &[String]) -> String {
     replace_needles_with(s, needles, "[redacted]").0
 }

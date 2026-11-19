@@ -4,6 +4,7 @@
 //! summary, PNG pixel diffing and base64.
 
 use crate::tool::Ctx;
+use craft_anything_analysis::web_har::{contains_ascii_ci, encode_query, replace_needles_with};
 use craft_anything_engines::cdp::{self, CdpClient, CdpEvent, Deadline, Endpoint, WsConn};
 use craft_anything_evidence::{Environment, ErrorCode, ToolError, host_triple, sha256_hex};
 use craft_anything_platform::process::{Process, RunningProcess, StdinMode};
@@ -488,7 +489,28 @@ impl Secrets {
     pub fn new(values: &[String]) -> Self {
         let mut spellings: Vec<String> = Vec::new();
         for v in values.iter().filter(|v| !v.is_empty()) {
-            for s in [v.clone(), percent_encode(v), json_escape(v)] {
+            let pct_component = percent_encode(v);
+            let pct_up = encode_query(v, false, true);
+            let pct_lo = encode_query(v, false, false);
+            let form_up = encode_query(v, true, true);
+            let form_lo = encode_query(v, true, false);
+            let quote_plus_up = pct_up.replace("%20", "+");
+            let quote_plus_lo = pct_lo.replace("%20", "+");
+            for s in [
+                v.clone(),
+                v.to_ascii_lowercase(),
+                v.to_ascii_uppercase(),
+                pct_component.clone(),
+                pct_component.to_ascii_lowercase(),
+                pct_up,
+                pct_lo,
+                form_up,
+                form_lo,
+                quote_plus_up,
+                quote_plus_lo,
+                json_escape(v),
+                v.replace(' ', "+"),
+            ] {
                 if !s.is_empty() && !spellings.contains(&s) {
                     spellings.push(s);
                 }
@@ -503,19 +525,10 @@ impl Secrets {
         self.raw.len()
     }
 
-    /// Redact every declared spelling in a string.
+    /// Redact every declared spelling (ASCII case-insensitively, merging overlapping matches) in a string.
     pub fn text(&mut self, s: &str) -> String {
-        if self.spellings.is_empty() {
-            return s.to_string();
-        }
-        let mut out = s.to_string();
-        for spelling in &self.spellings {
-            if out.contains(spelling.as_str()) {
-                let n = out.matches(spelling.as_str()).count() as u64;
-                out = out.replace(spelling.as_str(), REDACTED);
-                self.redactions += n;
-            }
-        }
+        let (out, count) = replace_needles_with(s, &self.spellings, REDACTED);
+        self.redactions = self.redactions.saturating_add(count);
         out
     }
 
@@ -535,10 +548,9 @@ impl Secrets {
         }
     }
 
-    /// True when a string (or its bytes) still contains any raw declared value — used by tests to
-    /// prove nothing leaked.
+    /// True when `haystack` still contains any declared spelling (raw or encoded, ASCII case-insensitively).
     pub fn leaks_in(&self, haystack: &str) -> bool {
-        self.raw.iter().any(|v| haystack.contains(v.as_str()))
+        self.spellings.iter().any(|sp| contains_ascii_ci(haystack, sp))
     }
 }
 
@@ -1401,6 +1413,48 @@ mod tests {
         assert!(!text.contains("tok-123"));
         assert!(!text.contains("p%40ss%20word"));
         assert!(s.redactions >= 4);
+    }
+
+    /// Form-encoded (`+`, `*` literal, `~` as `%7E`), mixed-case `%xx`, and ASCII case variants redact in `Secrets`.
+    #[test]
+    fn secrets_redact_form_urlencoded_asterisk_tilde_and_mixed_case_spellings() {
+        let mut s = Secrets::new(&["Bearer tok==".into(), "MySecret/1".into(), "a*b~ c".into()]);
+        let v = json!({
+            "url": "https://api.example.test/v1/MYSECRET%2f1?auth=Bearer+tok%3D%3D&q=a*b%7E+c&py=a%2Ab~+c&gen=a%2ab~%20c",
+            "header": "hint=Bearer+Tok%3d%3d; v=A*B%7e+C; py=a%2Ab~+c",
+            "body": "MYSECRET/1 and MySecret%2f1 and a*b%7e+c and a%2ab~+c",
+        });
+        let out = s.scrub(&v);
+        let text = out.to_string().to_ascii_lowercase();
+        assert!(!s.leaks_in(&text), "{text}");
+        for forbidden in ["tok==", "tok%3d%3d", "mysecret/1", "mysecret%2f1", "a*b~ c", "a*b%7e+c", "a%2ab~+c", "a%2ab~%20c"] {
+            assert!(!text.contains(forbidden), "Secrets leaked `{forbidden}` in `{text}`");
+        }
+        assert!(s.redactions >= 7, "expected at least 7 redactions, got {}", s.redactions);
+    }
+
+    /// Overlapping, adjacent, and same-origin secret matches merge into complete redactions without leaking suffixes.
+    #[test]
+    fn secrets_redact_overlapping_adjacent_and_same_origin_matches() {
+        let mut overlap = Secrets::new(&["Bearer abc".into(), "abc123456789".into()]);
+        let out = overlap.text("Bearer abc123456789");
+        assert_eq!(out, "«redacted»");
+        assert!(!overlap.leaks_in(&out), "{out}");
+        assert!(!out.contains("123456789"), "{out}");
+        assert_eq!(overlap.redactions, 1);
+        assert_eq!(overlap.text("前Bearer abc123456789后"), "前«redacted»后");
+
+        let mut partial = Secrets::new(&["alpha-beta".into(), "beta-gamma".into(), "Key One".into(), "One/Two".into()]);
+        assert_eq!(partial.text("id=alpha-beta-gamma&q=key+one%2ftwo&keep=safe"), "id=«redacted»&q=«redacted»&keep=safe");
+        assert_eq!(partial.redactions, 2);
+
+        let mut adjacent = Secrets::new(&["pfx-".into(), "tok999".into()]);
+        assert_eq!(adjacent.text("hdr=pfx-tok999!"), "hdr=«redacted»«redacted»!");
+        assert_eq!(adjacent.redactions, 2);
+
+        let mut same_origin = Secrets::new(&["tok".into(), "tok-extended".into()]);
+        assert_eq!(same_origin.text("a=tok-extended&b=tok"), "a=«redacted»&b=«redacted»");
+        assert_eq!(same_origin.redactions, 2);
     }
 
     #[test]

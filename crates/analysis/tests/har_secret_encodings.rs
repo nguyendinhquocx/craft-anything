@@ -1,7 +1,7 @@
 //! Regression tests for form-encoded and mixed-case percent-escaped secret redaction in HAR inspection.
 
 use craft_anything_analysis::standin::{BuildOptions, build_from_bytes};
-use craft_anything_analysis::web_har::{HarOptions, all_strings, inspect_har};
+use craft_anything_analysis::web_har::{HarOptions, all_strings, contains_ascii_ci, encode_query, inspect_har, replace_needles_with};
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -232,4 +232,86 @@ fn form_urlencoded_asterisk_and_tilde_redact_in_har_and_standin() {
             assert!(!low.contains(forbidden), "stand-in leaked `{forbidden}` in `{s}`");
         }
     }
+}
+
+/// Overlapping, adjacent, and same-origin declared secrets must merge cleanly in HAR inspection and stand-in builds.
+#[test]
+fn overlapping_and_adjacent_secrets_never_leak_suffixes_in_har_or_standin() {
+    let har = serde_json::to_vec(&json!({
+        "log": {
+            "version": "1.2",
+            "entries": [{
+                "request": {
+                    "method": "GET",
+                    "url": "https://api.example.test/v1/echo?id=alpha-beta-gamma&q=key+one%2ftwo&adj=pfx-tok999&same=tok-extended&iso=tok",
+                    "headers": [
+                        {"name": "X-Trace", "value": "Bearer abc123456789"},
+                        {"name": "X-Prefix", "value": "Prefix abc123456"},
+                        {"name": "X-Utf8", "value": "前Prefix abc123456后"}
+                    ]
+                },
+                "response": {
+                    "status": 200,
+                    "headers": [
+                        {"name": "X-Echo", "value": "id=alpha-beta-gamma; q=key+one%2ftwo; adj=pfx-tok999"}
+                    ],
+                    "content": {
+                        "size": 120,
+                        "mimeType": "text/plain",
+                        "text": "Bearer abc123456789 | Prefix abc123456 | 前Prefix abc123456后 | alpha-beta-gamma | key+one%2ftwo | pfx-tok999 | tok-extended | tok"
+                    }
+                }
+            }]
+        }
+    }))
+    .unwrap();
+
+    let hidden = vec![
+        "Bearer abc".into(),
+        "abc123456789".into(),
+        "Prefix abc".into(),
+        "abc123456".into(),
+        "alpha-beta".into(),
+        "beta-gamma".into(),
+        "Key One".into(),
+        "One/Two".into(),
+        "pfx-".into(),
+        "tok999".into(),
+        "tok".into(),
+        "tok-extended".into(),
+    ];
+
+    let har_out = inspect_har(&har, &HarOptions { hidden_values: hidden.clone(), limit: 10, max_entries: 100, ..Default::default() }).unwrap();
+    assert_eq!(har_out["entries"][0]["request_headers"][0]["value"], "[redacted]");
+    assert_eq!(har_out["entries"][0]["request_headers"][1]["value"], "[redacted]");
+    assert_eq!(har_out["entries"][0]["request_headers"][2]["value"], "前[redacted]后");
+    let mut har_strings = BTreeSet::new();
+    all_strings(&har_out, &mut har_strings);
+    for s in &har_strings {
+        let low = s.to_ascii_lowercase();
+        for forbidden in ["123456789", "123456", "gamma", "two", "tok999", "extended"] {
+            assert!(!low.contains(forbidden), "HAR leaked `{forbidden}` in `{s}`");
+        }
+    }
+
+    let standin = build_from_bytes(&har, &BuildOptions { hidden_values: hidden, ..Default::default() }).unwrap();
+    let body = standin.routes[0].samples[0].text.as_deref().unwrap();
+    // `standin` scrubs `Bearer <credential>` tokens before `hide`, then `hide` merges overlapping spans (`Prefix abc` + `abc123456`, etc.) and replaces non-overlapping adjacent spans individually.
+    assert_eq!(body, "Bearer [dropped] | [dropped] | 前[dropped]后 | [dropped] | [dropped] | [dropped][dropped] | [dropped] | [dropped]");
+    let serialized = serde_json::to_value(&standin).unwrap();
+    let mut standin_strings = BTreeSet::new();
+    all_strings(&serialized, &mut standin_strings);
+    for s in &standin_strings {
+        let low = s.to_ascii_lowercase();
+        for forbidden in ["123456789", "123456", "gamma", "two", "tok999", "extended"] {
+            assert!(!low.contains(forbidden), "stand-in leaked `{forbidden}` in `{s}`");
+        }
+    }
+
+    // Direct checks on the shared public helpers, including unsorted needles.
+    assert!(contains_ascii_ci("Auth=Bearer+Tok%3d%3d", "bearer+tok%3D%3D"));
+    assert_eq!(encode_query("a*b~ c", true, true), "a*b%7E+c");
+    assert_eq!(encode_query("a*b~ c", false, false), "a%2ab~%20c");
+    let unsorted = vec!["tok".to_string(), "tok-extended".to_string(), "Bearer abc".to_string(), "abc123456789".to_string()];
+    assert_eq!(replace_needles_with("Bearer abc123456789 & tok-extended & tok", &unsorted, "«redacted»"), ("«redacted» & «redacted» & «redacted»".into(), 3));
 }

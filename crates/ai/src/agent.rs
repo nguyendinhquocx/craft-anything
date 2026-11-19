@@ -706,8 +706,13 @@ impl AgentLoop {
         self.emit(AgentEvent::Status { text: "Making room: summarising the earlier work…".into() });
         let messages = context::with_summary_request(&self.history[..cut]);
         let req = TurnRequest { system, messages: &messages, tools: &[], effort: Effort::Low, max_tokens: crate::anthropic::MAX_TOKENS };
-        let stop = self.stop.clone();
-        let summary = self.chain.get_mut(self.current).map(|slot| slot.model.turn(&req, &mut |_| {}, &stop));
+        let (stop, events) = (self.stop.clone(), self.events.clone());
+        let say = &mut |d| {
+            if let Delta::Status(text) = d {
+                let _ = events.send(AgentEvent::Status { text });
+            }
+        };
+        let summary = self.chain.get_mut(self.current).map(|slot| slot.model.turn(&req, say, &stop));
         let mut accounted = None;
         let text = match summary {
             Some(Ok(r)) => {
@@ -782,11 +787,15 @@ impl AgentLoop {
             let slot = self.chain.get_mut(self.current)?;
             let r = slot.model.turn(
                 &req,
-                &mut |d| {
-                    if let Delta::Text(t) = d {
+                &mut |d| match d {
+                    Delta::Text(t) => {
                         produced = true;
                         let _ = events.send(AgentEvent::TextDelta { text: t });
                     }
+                    Delta::Status(text) => {
+                        let _ = events.send(AgentEvent::Status { text });
+                    }
+                    Delta::Thinking(_) => {}
                 },
                 &stop,
             );

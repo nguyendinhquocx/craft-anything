@@ -1609,7 +1609,7 @@ pub fn project_builder<'a>(cfg: &crate::AiConfig, ws: &'a Workspace) -> Option<&
 }
 
 /// A project's saved builder that is no longer usable, and the AI that builds in its place.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BuilderReplacement {
     /// The AI the project saved, which is off or gone.
     pub saved: String,
@@ -1632,7 +1632,7 @@ pub fn builder_replacement(cfg: &crate::AiConfig, ws: &Workspace, explicit: Opti
 }
 
 /// The words for a saved builder that was turned off or removed and the one building instead.
-/// English for now: the wording needs a native speaker's check before it joins the catalogs.
+/// English for headless callers; the UI formats its own catalog entry from the literal names.
 pub fn replaced_builder_notice(saved: &str, used: &str) -> String {
     format!("The AI chosen for this project ({saved}) is turned off or no longer set up. {used} builds instead.")
 }

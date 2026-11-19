@@ -252,6 +252,12 @@ fn is_noreturn(name: &str) -> bool {
     NORETURN.contains(&b) || NORETURN.contains(&b.strip_prefix('_').unwrap_or(b)) || b.contains("panicking5panic") || b.starts_with("core::panicking::")
 }
 
+/// Clear the ARM interworking Thumb bit (`addr | 1`) when analysing Thumb (`Mode::T32`) code,
+/// leaving addresses on every other ISA unchanged.
+fn clean_code_addr(mode: Mode, addr: u64) -> u64 {
+    if mode == Mode::T32 { addr & !1 } else { addr }
+}
+
 struct Scan {
     insns: BTreeMap<u64, (u8, Flow)>,
     leaders: BTreeSet<u64>,
@@ -299,16 +305,15 @@ impl Program {
             }
         }
         scan_plt(img, mode, &slots, &mut stubs);
+        let clean = |a: u64| clean_code_addr(mode, a);
         let mut sym_noreturn = BTreeSet::new();
         for s in bin.symbols.iter().filter(|s| s.defined && s.kind == SymbolKind::Function) {
             if is_noreturn(&s.name) {
-                sym_noreturn.insert(s.addr);
+                sym_noreturn.insert(clean(s.addr));
             }
         }
         // Seeds.
         let mut seeds: Vec<(u64, &'static str)> = Vec::new();
-        let thumb = mode == Mode::T32;
-        let clean = |a: u64| if thumb { a & !1 } else { a };
         if let Some(e) = bin.entry {
             seeds.push((clean(e), "entry_point"));
         }
@@ -330,8 +335,9 @@ impl Program {
         let mut meta_names: BTreeMap<u64, (String, &'static str)> = BTreeMap::new();
         for f in craft_anything_formats::go::functions(&img.data) {
             if f.entry != 0 {
-                meta_names.entry(f.entry).or_insert((f.name, "go_pclntab"));
-                seeds.push((f.entry, "go_pclntab"));
+                let entry = clean(f.entry);
+                meta_names.entry(entry).or_insert((f.name, "go_pclntab"));
+                seeds.push((entry, "go_pclntab"));
             }
         }
         if bin.format == Format::MachO {
@@ -339,12 +345,13 @@ impl Program {
             for c in &meta.classes {
                 for m in &c.methods {
                     if let Some(imp) = m.imp {
+                        let entry = clean(imp);
                         let class = match &c.category {
                             Some(cat) => format!("{}({cat})", c.name),
                             None => c.name.clone(),
                         };
-                        meta_names.entry(imp).or_insert_with(|| (format!("{}[{class} {}]", m.kind, m.selector), "objc"));
-                        seeds.push((imp, "objc"));
+                        meta_names.entry(entry).or_insert_with(|| (format!("{}[{class} {}]", m.kind, m.selector), "objc"));
+                        seeds.push((entry, "objc"));
                     }
                 }
             }
@@ -402,7 +409,8 @@ impl Program {
                         queue.push_back((t, "call"));
                     }
                 }
-                for &p in &scan.code_ptrs {
+                for &raw_p in &scan.code_ptrs {
+                    let p = clean(raw_p);
                     if !scan.insns.contains_key(&p) && p % mode.align() == 0 && known.insert(p) {
                         queue.push_back((p, "code_pointer"));
                     }
@@ -509,7 +517,7 @@ impl Program {
         // Data → code and data → string pointers.
         ctl.progress(0.93, "scanning data for pointers");
         let string_index: BTreeMap<u64, usize> = strings.iter().enumerate().map(|(i, s)| (s.addr, i)).collect();
-        pointer_scan(img, limits, &functions, &string_index, &mut all_xrefs);
+        pointer_scan(img, mode, limits, &functions, &string_index, &mut all_xrefs);
         let strings = split_at_references(strings, &all_xrefs);
         let string_index: BTreeMap<u64, usize> = strings.iter().enumerate().map(|(i, s)| (s.addr, i)).collect();
         // Re-classify references that land on strings.
@@ -542,7 +550,7 @@ impl Program {
         let main_guess = guess_main(img, mode, &functions, &slots);
         let mut names_taken: BTreeSet<String> = BTreeSet::new();
         for f in functions.values_mut() {
-            let (name, source) = function_name(img, f, &stubs, &meta_names, main_guess);
+            let (name, source) = function_name(img, mode, f, &stubs, &meta_names, main_guess);
             f.name = name;
             f.name_source = source;
             names_taken.insert(f.name.clone());
@@ -557,6 +565,12 @@ impl Program {
                 if let Some(d) = &s.demangled {
                     name_index.entry(d.clone()).or_insert(clean(s.addr));
                 }
+            }
+        }
+        for e in &bin.exports {
+            let addr = clean(e.addr);
+            if functions.contains_key(&addr) {
+                name_index.entry(e.name.clone()).or_insert(addr);
             }
         }
         let mut block_index = BTreeMap::new();
@@ -1239,7 +1253,7 @@ fn prologue_scan(img: &Image, mode: Mode, covered: &BTreeMap<u64, u64>) -> Vec<u
     out
 }
 
-fn pointer_scan(img: &Image, limits: &Limits, functions: &BTreeMap<u64, Function>, strings: &BTreeMap<u64, usize>, xrefs: &mut Vec<Xref>) {
+fn pointer_scan(img: &Image, mode: Mode, limits: &Limits, functions: &BTreeMap<u64, Function>, strings: &BTreeMap<u64, usize>, xrefs: &mut Vec<Xref>) {
     let bin = &img.bin;
     let ptr = img.pointer_size();
     if ptr < 4 {
@@ -1263,8 +1277,9 @@ fn pointer_scan(img: &Image, limits: &Limits, functions: &BTreeMap<u64, Function
                 && v != 0
             {
                 let Some(from) = s.addr.checked_add(i as u64) else { break };
-                if functions.contains_key(&v) {
-                    xrefs.push(Xref { from, to: v, kind: XrefKind::Pointer });
+                let code_target = clean_code_addr(mode, v);
+                if functions.contains_key(&code_target) {
+                    xrefs.push(Xref { from, to: code_target, kind: XrefKind::Pointer });
                 } else if strings.contains_key(&v) {
                     xrefs.push(Xref { from, to: v, kind: XrefKind::String });
                 }
@@ -1279,7 +1294,7 @@ fn pointer_scan(img: &Image, limits: &Limits, functions: &BTreeMap<u64, Function
 
 /// `_start` passes `main` to `__libc_start_main` in the first argument register.
 fn guess_main(img: &Image, mode: Mode, functions: &BTreeMap<u64, Function>, slots: &BTreeMap<u64, SlotInfo>) -> Option<u64> {
-    let entry = img.bin.entry?;
+    let entry = clean_code_addr(mode, img.bin.entry?);
     let f = functions.get(&entry)?;
     let call = f.calls.iter().find(|c| c.import.as_deref().map(bare) == Some("__libc_start_main"))?;
     let arg = match mode {
@@ -1306,6 +1321,7 @@ fn guess_main(img: &Image, mode: Mode, functions: &BTreeMap<u64, Function>, slot
 
 fn function_name(
     img: &Image,
+    mode: Mode,
     f: &Function,
     stubs: &BTreeMap<u64, String>,
     meta: &BTreeMap<u64, (String, &'static str)>,
@@ -1313,12 +1329,12 @@ fn function_name(
 ) -> (String, &'static str) {
     let bin = &img.bin;
     let mut syms: Vec<&craft_anything_formats::Symbol> =
-        bin.symbols.iter().filter(|s| s.defined && s.kind == SymbolKind::Function && (s.addr == f.entry || s.addr == f.entry | 1)).collect();
+        bin.symbols.iter().filter(|s| s.defined && s.kind == SymbolKind::Function && clean_code_addr(mode, s.addr) == f.entry).collect();
     syms.sort_by_key(|s| (!s.global, s.name.starts_with('$'), s.name.len()));
     if let Some(s) = syms.first() {
         return (s.name.clone(), "symbol");
     }
-    if let Some(e) = bin.exports.iter().find(|e| e.addr == f.entry) {
+    if let Some(e) = bin.exports.iter().find(|e| clean_code_addr(mode, e.addr) == f.entry) {
         return (e.name.clone(), "export");
     }
     if let Some((n, source)) = meta.get(&f.entry) {
@@ -1336,7 +1352,7 @@ fn function_name(
     if Some(f.entry) == main_guess {
         return ("main".into(), "heuristic");
     }
-    if Some(f.entry) == bin.entry {
+    if bin.entry.map(|e| clean_code_addr(mode, e)) == Some(f.entry) {
         return ("entry".into(), "entry_point");
     }
     (format!("sub_{:x}", f.entry), "generated")
