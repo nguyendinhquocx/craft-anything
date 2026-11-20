@@ -903,9 +903,13 @@ impl<'a> Scanner<'a> {
             };
             (Some(used), "high", Some(block_size), compression)
         } else {
+            let (block_size, block_log) = (u32f(51)?, u16f(34)?);
+            if !(12..=20).contains(&block_log) || 1u32.checked_shl(u32::from(block_log)) != Some(block_size) {
+                return None;
+            }
             // Version 3 keeps a 64-bit bytes_used at +63; version 2 a 32-bit one at +8.
             let used = if major == 3 { if be { self.r.u64_be(i + 63) } else { self.r.u64_le(i + 63) } } else { u32f(8).map(u64::from) };
-            (used, "medium", u32f(51), "unknown")
+            (used, "medium", Some(block_size), "unknown")
         };
         let used = used.filter(|u| *u >= 96)?;
         let (len, cut) = clamp(used, i, self.data.len());
@@ -1858,6 +1862,7 @@ mod tests {
         // The inode table's start, where version 4 names its compression.
         put(20, 0x0002_0002, 4);
         put(28, u64::from(major), 2);
+        put(34, u64::from(block_size.trailing_zeros()), 2);
         put(51, u64::from(block_size), 4);
         if major == 3 {
             put(63, 4096, 8);
@@ -1879,14 +1884,38 @@ mod tests {
             assert_eq!(sq.details["compression"], "unknown", "{major} {be}");
             assert!(sq.description.ends_with(", unknown)"), "{major} {be}: {}", sq.description);
         }
-        // A superblock cut before its block size still gives the region, without one.
+        // A candidate cut before its block size cannot establish the block layout.
         let cut = &old_squashfs(2, false, 0x1234, 65_536)[..53];
         let r = scan(cut, &ScanOptions::default(), &no_stop);
-        let sq = r.regions.iter().find(|x| x.kind == "squashfs").unwrap();
-        assert!(sq.details["block_size"].is_null(), "{:?}", sq.details);
+        assert!(!r.regions.iter().any(|x| x.kind == "squashfs"));
         // Version 4 keeps its block size at 12.
         let r = scan(&fx::squashfs(4096), &ScanOptions::default(), &no_stop);
         assert_eq!(r.regions.iter().find(|x| x.kind == "squashfs").unwrap().details["block_size"], 131_072);
+    }
+
+    #[test]
+    fn an_older_squashfs_requires_a_consistent_block_layout() {
+        for (major, be) in [(2, false), (2, true), (3, false), (3, true)] {
+            for block_log in 12..=20 {
+                let block_size = 1u32 << block_log;
+                let img = old_squashfs(major, be, 0x1234, block_size);
+                let r = scan(&img, &ScanOptions::default(), &no_stop);
+                let sq = r.regions.iter().find(|x| x.kind == "squashfs").unwrap();
+                assert_eq!(sq.details["block_size"], block_size);
+            }
+            for (block_size, block_log) in [(0, 16u16), (65_536, 0), (65_536, 15), (65_536, 32), (65_536, u16::MAX), (65_537, 16), (2048, 11), (2_097_152, 21)]
+            {
+                let mut img = old_squashfs(major, be, 0x1234, block_size);
+                img[34..36].copy_from_slice(&if be { block_log.to_be_bytes() } else { block_log.to_le_bytes() });
+                let r = scan(&img, &ScanOptions::default(), &no_stop);
+                assert!(!r.regions.iter().any(|x| x.kind == "squashfs"), "{major} {be}: {block_size} / {block_log}");
+            }
+            let img = old_squashfs(major, be, 0x1234, 65_536);
+            let header_end = if major == 2 { 55 } else { 71 };
+            let r = scan(&img[..header_end], &ScanOptions::default(), &no_stop);
+            let sq = r.regions.iter().find(|x| x.kind == "squashfs").unwrap();
+            assert_eq!(sq.details["truncated"], true, "a validated header still identifies a truncated image");
+        }
     }
 
     #[test]

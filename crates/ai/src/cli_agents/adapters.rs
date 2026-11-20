@@ -422,6 +422,15 @@ fn no_such_session(v: &Value) -> bool {
     turns == 0 && (v.get("errors").and_then(Value::as_array).is_some_and(|a| a.iter().any(named)) || v.get("result").is_some_and(named))
 }
 
+/// How Claude Code's result says its conversation no longer fits the model's context. Nothing
+/// more can be sent to that session, so resuming it again only repeats the refusal (#2042).
+const SESSION_FULL: &str = "Prompt is too long";
+
+/// A failed result that only says the conversation has grown too long to take another message.
+fn session_full(v: &Value) -> bool {
+    v.get("result").and_then(Value::as_str).is_some_and(|r| r.trim().starts_with(SESSION_FULL))
+}
+
 /// Claude Code in headless mode (flags checked against `claude --help`).
 #[derive(Default)]
 pub struct ClaudeCode {
@@ -610,6 +619,14 @@ impl AgentAdapter for ClaudeCode {
                             "It was started on another computer or in another folder. Ask again: a new conversation starts from what the project already has."
                                 .into(),
                         ),
+                        log: None,
+                    });
+                } else if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) && session_full(v) {
+                    // Like a session that isn't here: the next message starts a new one.
+                    p.session_missing = true;
+                    out.push(AgentEvent::Error {
+                        message: "Claude Code's conversation about this project has grown too long to continue.".into(),
+                        remediation: Some("Ask again: a new conversation starts from what the project already has.".into()),
                         log: None,
                     });
                 } else if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
@@ -962,8 +979,8 @@ impl AgentAdapter for Codex {
         let args_toml = format!("[{}]", mcp_args.iter().map(|s| toml_string(s)).collect::<Vec<_>>().join(", "));
         v.extend(["-c".into(), format!("mcp_servers.{MCP_NAME}.args={args_toml}")]);
         // `codex exec` can't ask, so without this it refuses a tool not marked read-only, such as
-        // rebuild_start, before our server sees the call (#540). Only tools that ask the person
-        // themselves are approved; every other tool keeps the person's own Codex policy.
+        // rebuild_start, before our server sees the call (#540). Only tools we limit ourselves
+        // (consent, or the asset budget: #1464) are approved; the rest keep the person's policy.
         for tool in craft_anything_engine::AGENT_APP_PREAPPROVED_TOOLS {
             v.extend(["-c".into(), format!("mcp_servers.{MCP_NAME}.tools.{tool}.approval_mode=\"approve\"")]);
         }
@@ -1099,7 +1116,7 @@ pub(crate) fn codex_tool_text(item: &Value, tool: &str, ours: bool) -> String {
     // Another MCP server's refusal isn't fixed by our setup: it keeps Codex's own words.
     if ours && text.contains(CODEX_NEEDS_APPROVAL) {
         // The feed keeps 200 characters of a result, so the fix comes first and fits. Setup
-        // approves only the tools that ask the person themselves; any other is approved, or not,
+        // approves only the tools we limit ourselves; any other is approved, or not,
         // in the person's own Codex settings, and setup changes nothing for it (#1867).
         if craft_anything_engine::AGENT_APP_PREAPPROVED_TOOLS.contains(&tool) {
             return format!(

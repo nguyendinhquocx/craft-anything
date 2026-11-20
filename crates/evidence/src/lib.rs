@@ -307,6 +307,10 @@ pub fn find_result_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize> {
     // The names that hold a list somewhere within reach.
     fn holding_lists<'a>(v: &'a Value, depth: usize, names: &mut std::collections::HashSet<&'a str>) {
+        #[cfg(test)]
+        if depth == 0 {
+            tests::LOOKUP_WALKS.set((true, tests::LOOKUP_WALKS.get().1));
+        }
         let Value::Object(m) = v else { return };
         if depth > RESULT_KEY_DEPTH {
             return;
@@ -321,6 +325,10 @@ pub fn result_lists(result: &Value) -> std::collections::BTreeMap<String, usize>
     // What each of those names reaches, found in one walk in `find_result_key`'s order: an
     // object's own keys before anything below it, and earlier values before later ones.
     fn reach<'a>(v: &'a Value, depth: usize, names: &std::collections::HashSet<&'a str>, found: &mut std::collections::HashMap<&'a str, &'a Value>) {
+        #[cfg(test)]
+        if depth == 0 {
+            tests::LOOKUP_WALKS.set((tests::LOOKUP_WALKS.get().0, true));
+        }
         let Value::Object(m) = v else { return };
         if depth > RESULT_KEY_DEPTH {
             return;
@@ -487,6 +495,10 @@ pub fn is_evidence_id(s: &str) -> bool {
 mod tests {
     use super::*;
 
+    thread_local! {
+        pub(super) static LOOKUP_WALKS: std::cell::Cell<(bool, bool)> = const { std::cell::Cell::new((false, false)) };
+    }
+
     fn sample() -> Evidence {
         EvidenceBuilder::new(
             "core_overview_show",
@@ -551,7 +563,9 @@ mod tests {
             if count < MAX_LISTED {
                 expected.insert("nested".into(), 2);
             }
+            LOOKUP_WALKS.set((false, false));
             assert_eq!(result_lists(&Value::Object(root)), expected);
+            assert_eq!(LOOKUP_WALKS.get(), (count < MAX_LISTED, count < MAX_LISTED));
         }
     }
 

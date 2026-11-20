@@ -46,7 +46,11 @@ craft-wasm = { git = "https://github.com/storytold/craft-libs", rev = "d118983bf
 craft-plist = { git = "https://github.com/storytold/craft-libs", rev = "d118983bf922ac96c68b885dc55da30435adbc7d" }
 craft-sniff = { git = "https://github.com/storytold/craft-libs", rev = "d118983bf922ac96c68b885dc55da30435adbc7d" }
 craft-dex = { git = "https://github.com/storytold/craft-libs", rev = "35afed3956e14fb813f8c27bc82d65c2bce00028" }
-craft-pkcs7 = { git = "https://github.com/storytold/craft-libs", rev = "010702ee9b030844c852939095b1da0d0656a890" }
+craft-pkcs7 = { git = "https://github.com/storytold/craft-libs", rev = "1acd07f6bc48b04df49aa00e1c3852b159151d63" }
+craft-sqlite = { git = "https://github.com/storytold/craft-libs", rev = "f428c3d36e0faf3924b76956a01334c051543527" }
+craft-jsonrpc = { git = "https://github.com/storytold/craft-libs", rev = "512a1b8e8b59a7b325e7f69f6131aa8628470288" }
+craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "512a1b8e8b59a7b325e7f69f6131aa8628470288" }
+craft-dds = { git = "https://github.com/storytold/craft-libs", rev = "429937ad72e16fa2bb5a9f085dee80809e4a566d" }
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -94,11 +98,17 @@ unsafe_code = "forbid"
 dbg_macro = "warn"
 todo = "warn"
 
+# Full debug information made about 90% of every development executable and filled disks (#1584).
+# Our own code keeps file and line for backtraces; dependencies carry none. To step through
+# variables in a debugger, build with CARGO_PROFILE_DEV_DEBUG=2 (our crates only); for
+# dependencies too, add --config 'profile.dev.package."*".debug=2'.
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
 
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

@@ -724,6 +724,34 @@ mod tests {
         assert_eq!(live.launch(&ws, None).unwrap().0, program);
     }
 
+    /// A saved Live pin of a workspace member's project: Cargo builds the member into the
+    /// workspace's `target/`, outside the app, which the file lookup reads; another member's
+    /// program of the same name there doesn't count.
+    #[test]
+    fn a_saved_live_pin_finds_a_workspace_members_build() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Snake", "a snake game", TargetRef::None).unwrap();
+        std::fs::write(ws.root.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n").unwrap();
+        let app = ws.app_dir();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"member-probe\"\n").unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let debug = ws.root.join("target/debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        let program = debug.join(exe("member-probe"));
+        std::fs::write(&program, b"program").unwrap();
+        mark_program(&program);
+        let other = d.path().join("other/src/main.rs");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "fn main() {}\n").unwrap();
+        let record = |source: &Path| std::fs::write(debug.join("member-probe.d"), format!("{}: {}\n", program.display(), source.display())).unwrap();
+        let live = read_pin(br#"{"id":2,"name":"A","mode":"live","created_ms":5}"#).unwrap();
+        record(&other);
+        assert!(live.launch(&ws, None).is_err(), "another project's program of that name isn't started");
+        record(&app.join("src/main.rs"));
+        assert_eq!(live.launch(&ws, None).unwrap().0, crate::workspace::normalized(&program));
+    }
+
     /// R5.7: a named program built outside the app (a moved Cargo target directory) is copied into
     /// the pin and recorded there, so a frozen pin doesn't depend on the external build folder.
     #[test]

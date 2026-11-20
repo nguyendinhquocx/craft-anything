@@ -1087,9 +1087,25 @@ impl AiHub {
     }
 
     fn entry(&self, name: &str) -> Result<BackendEntry, ToolError> {
-        self.config().get(name).cloned().ok_or_else(|| {
-            ToolError::invalid(format!("No AI backend named {name:?}")).with_remediation("See `craft-anything-cli ai list`, or add one in Settings → AI.")
-        })
+        let cfg = self.config();
+        cfg.get(name).cloned().ok_or_else(|| Self::no_backend(name))
+    }
+
+    fn no_backend(name: &str) -> ToolError {
+        ToolError::invalid(format!("No AI backend named {name:?}")).with_remediation("See `craft-anything-cli ai list`, or add one in Settings → AI.")
+    }
+
+    /// A backend that is named for a conversation must be on: `ai off` says nothing uses it, and
+    /// Settings treats an off AI as unusable. Listing models and testing a saved backend still
+    /// reach it through `entry`, so it can be configured before it is turned on. `cfg` is the
+    /// same snapshot the conversation is started from.
+    fn entry_on(cfg: &AiConfig, name: &str) -> Result<BackendEntry, ToolError> {
+        let e = cfg.get(name).cloned().ok_or_else(|| Self::no_backend(name))?;
+        if !e.config.enabled {
+            return Err(ToolError::new(ErrorCode::BadSettings, format!("{} is turned off.", e.config.name))
+                .with_remediation("Turn it on in Settings → AI, or run `craft-anything-cli ai on` with its name, then try again."));
+        }
+        Ok(e)
     }
 
     fn key_for(&self, e: &BackendEntry) -> Result<String, ToolError> {
@@ -1181,16 +1197,18 @@ impl AiHub {
     pub fn start(&self, backend: Option<&str>, beginner: bool) -> Result<Box<dyn Conversation>, ToolError> {
         let cfg = self.config();
         let first = match backend {
-            Some(n) => self.entry(n)?,
+            Some(n) => Self::entry_on(&cfg, n)?,
             None => cfg
                 .backend_for(Role::Lead)
                 .cloned()
                 .ok_or_else(|| ToolError::unavailable("No AI is set up yet.").with_remediation("Add one in Settings → AI."))?,
         };
-        if !first.config.enabled {
-            return Err(ToolError::new(ErrorCode::BadSettings, format!("{} is turned off.", first.config.name))
-                .with_remediation("Turn it on in Settings → AI, or choose another backend for this conversation."));
-        }
+        self.start_selected(first, &cfg, beginner)
+    }
+
+    /// Start on an entry already chosen (and, when named, checked to be on), using the same
+    /// configuration snapshot for its fallback chain.
+    fn start_selected(&self, first: BackendEntry, cfg: &AiConfig, beginner: bool) -> Result<Box<dyn Conversation>, ToolError> {
         if first.config.kind == BackendKind::AgentCli {
             return Ok(Box::new(cli_agents::SharedConversation::new(self.engine.clone(), self.keys.clone(), first, beginner)?));
         }
@@ -1214,38 +1232,35 @@ impl AiHub {
     /// every toolset is enabled, so it can look inside the original with all of them.
     /// `transcript`: where the conversation is kept, and resumed from when it's there in this
     /// mode. `deep` is the run's mode, given by the caller: a tool that starts a build holds the
-    /// session (#1102).
-    pub fn start_builder(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>, deep: bool) -> Result<ApiConversation, ToolError> {
-        use craft_anything_engine::Toolset;
-        let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
-        self.start_loop(entry, beginner, transcript, deep, &toolsets, true)
-    }
-
-    /// Start the asset extractor: our agent loop with the Build tools and the game archive tools.
-    pub fn start_extractor(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
-        use craft_anything_engine::Toolset;
-        self.start_loop(entry, beginner, transcript, true, &[Toolset::Core, Toolset::Build, Toolset::Formats], false)
-    }
-
-    /// Start one loop with these toolsets, keeping its transcript and resuming it only in `deep`.
-    fn start_loop(
+    /// session (#1102). `notes`: the build's notes folder, read between tool steps.
+    pub fn start_builder(
         &self,
         entry: &BackendEntry,
         beginner: bool,
         transcript: Option<PathBuf>,
         deep: bool,
-        toolsets: &[craft_anything_engine::Toolset],
-        lean_for_local: bool,
+        notes: Option<PathBuf>,
     ) -> Result<ApiConversation, ToolError> {
+        use craft_anything_engine::Toolset;
+        let toolsets = if deep { self.engine.registry().toolsets() } else { vec![Toolset::Core, Toolset::Build] };
+        self.start_loop(entry, &toolsets, LoopConfig { beginner, transcript, deep, lean_for_local: true, notes, ..LoopConfig::default() })
+    }
+
+    /// Start the asset extractor: our agent loop with the Build tools and the game archive tools.
+    pub fn start_extractor(&self, entry: &BackendEntry, beginner: bool, transcript: Option<PathBuf>) -> Result<ApiConversation, ToolError> {
+        use craft_anything_engine::Toolset;
+        let cfg = LoopConfig { beginner, transcript, deep: true, ..LoopConfig::default() };
+        self.start_loop(entry, &[Toolset::Core, Toolset::Build, Toolset::Formats], cfg)
+    }
+
+    /// Start one loop with these toolsets and `cfg`, which keeps its transcript and resumes it only
+    /// in its mode; the prices and failure logs are the hub's.
+    fn start_loop(&self, entry: &BackendEntry, toolsets: &[craft_anything_engine::Toolset], cfg: LoopConfig) -> Result<ApiConversation, ToolError> {
         let mut slot = self.build_model(entry)?;
         slot.max_turns = slot.max_turns.max(agent::BUILDER_MAX_TURNS);
         let host = Arc::new(EngineHost(self.engine.clone()));
-        ApiConversation::start_with(
-            host,
-            vec![slot],
-            LoopConfig { beginner, prices: self.config().prices.clone(), transcript, deep, lean_for_local, logs: self.failure_logs(), ..LoopConfig::default() },
-            toolsets.iter().copied().collect(),
-        )
+        let cfg = LoopConfig { prices: self.config().prices.clone(), logs: self.failure_logs(), ..cfg };
+        ApiConversation::start_with(host, vec![slot], cfg, toolsets.iter().copied().collect())
     }
 
     /// Start a conversation with whichever backend fills `role` in the crew.
@@ -1264,7 +1279,12 @@ impl AiHub {
         if a == b {
             return Err(ToolError::invalid("Pick two different backends to compare."));
         }
-        Ok(vec![(a.to_string(), self.start(Some(a), beginner)?), (b.to_string(), self.start(Some(b), beginner)?)])
+        // Check both before the first conversation starts, and start from those checked entries,
+        // so an off or unknown second name cannot leave a comparison half-started.
+        let cfg = self.config();
+        let a_entry = Self::entry_on(&cfg, a)?;
+        let b_entry = Self::entry_on(&cfg, b)?;
+        Ok(vec![(a.to_string(), self.start_selected(a_entry, &cfg, beginner)?), (b.to_string(), self.start_selected(b_entry, &cfg, beginner)?)])
     }
 
     /// Live model list for a backend. Blocking (bounded); run it off the UI thread.

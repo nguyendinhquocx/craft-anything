@@ -570,8 +570,9 @@ pub struct StreamParser {
     /// A missing or invalid per-step cost cannot become a complete turn total later.
     cost_incomplete: bool,
     pub saw_result: bool,
-    /// The run was asked to continue a saved session the agent doesn't have (it lives on another
-    /// computer, or under another folder), so it did nothing.
+    /// The run was asked to continue a saved session the agent can't continue: it doesn't have it
+    /// (it lives on another computer, or under another folder), or the session has grown too long
+    /// to take another message. Either way it did nothing, and the next message starts a new one.
     pub session_missing: bool,
     /// A protocol fact about the failed turn, independent of the text shown to the person.
     pub failure: Option<TurnFailure>,
@@ -2098,13 +2099,20 @@ mod tests {
         assert!(pos("--mcp-config") > pos("--resume"));
     }
 
-    /// #540: only tools that ask the person themselves are approved on Codex's side.
+    /// #540, #1464: only tools we limit ourselves are approved on Codex's side: one that asks for
+    /// consent, or one that spends only within the project's asset budget.
     #[test]
-    fn every_tool_approved_for_codex_is_registered_and_asks_for_consent() {
+    fn every_tool_approved_for_codex_is_registered_and_limited_by_us() {
         let e = craft_anything_engine::Engine::shared(craft_anything_engine::testing::session(), crate::rebuild::tools::specs());
         for id in craft_anything_engine::AGENT_APP_PREAPPROVED_TOOLS {
             let spec = e.registry().get(id).unwrap_or_else(|| panic!("{id} isn't registered"));
-            assert!(spec.effects.needs_consent(), "{id} must ask for consent itself");
+            assert!(
+                spec.effects.needs_consent() || craft_anything_engine::ASSETS_SPENDING_TOOLS.contains(id),
+                "{id} must ask for consent itself or stay within the asset budget"
+            );
+        }
+        for id in craft_anything_engine::ASSETS_SPENDING_TOOLS {
+            assert!(craft_anything_engine::AGENT_APP_PREAPPROVED_TOOLS.contains(&id), "#1464: Codex refused {id}");
         }
     }
 
@@ -2202,6 +2210,7 @@ mod tests {
         // #540: `codex exec` can't ask, so the tools that ask for themselves are approved in the
         // same -c list, and nothing wider.
         assert!(a.contains(&"mcp_servers.craft-anything.tools.rebuild_start.approval_mode=\"approve\"".to_string()));
+        assert!(a.contains(&"mcp_servers.craft-anything.tools.assets_image_generate.approval_mode=\"approve\"".to_string()), "#1464");
         assert!(!a.iter().any(|x| x.contains("default_tools_approval_mode")));
         let g = build_args(adapter_for("gemini-cli").as_ref(), &BackendOptions::default(), "q", "", &mcp(), None, Access::Analyse);
         assert!(g.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
@@ -2555,6 +2564,23 @@ mod tests {
         let events = p.line(&other.to_string());
         assert!(!p.session_missing);
         assert!(matches!(events.as_slice(), [AgentEvent::Error { message, .. }] if message.contains("error_during_execution")), "{events:?}");
+    }
+
+    /// #2042: a conversation too long to take another message is refused the same way however
+    /// often it's resumed, so it is left behind like one that isn't here.
+    #[test]
+    fn a_session_that_has_grown_too_long_is_left_behind() {
+        let full = json!({"type":"result","subtype":"success","is_error":true,"num_turns":1,"session_id":"39b5b312-5678-1234-961c-32112666ffab","total_cost_usd":0,"result":"Prompt is too long"});
+        let mut p = StreamParser::new(adapter_for("claude-code"));
+        let events = p.line(&full.to_string());
+        assert!(p.session_missing);
+        let [AgentEvent::Error { message, remediation: Some(fix), .. }] = events.as_slice() else { panic!("{events:?}") };
+        assert!(message.contains("grown too long") && fix.contains("Ask again"), "{message} / {fix}");
+        // The words inside another failure's text aren't that refusal.
+        let other = json!({"type":"result","subtype":"success","is_error":true,"num_turns":3,"result":"The tool said: Prompt is too long"});
+        let mut p = StreamParser::new(adapter_for("claude-code"));
+        p.line(&other.to_string());
+        assert!(!p.session_missing);
     }
 
     /// #451: Claude Code's session is found wherever it ran, and only by a real id.

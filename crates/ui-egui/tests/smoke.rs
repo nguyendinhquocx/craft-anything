@@ -3723,3 +3723,53 @@ fn settings_about_shows_the_apps_version() {
         h.step();
     }
 }
+
+/// A workspace member's build lands in the workspace's `target/`, outside the app: the Project
+/// screen finds it by reading the files (no process is started for it), so Play and "Pin this
+/// build" show. Another project's program of the same name there doesn't count.
+#[test]
+fn a_workspace_members_build_shows_play_on_the_project_screen() {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(&d.path().join("projects"), "Snake", "A snake game in Rust", TargetRef::None).unwrap();
+    std::fs::write(ws.root.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n").unwrap();
+    let app = ws.app_dir();
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(app.join("Cargo.toml"), "[package]\nname = \"snake\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let exe = if cfg!(windows) { "snake.exe" } else { "snake" };
+    let program = ws.root.join("target/debug").join(exe);
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, "x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let record = |source: &std::path::Path| {
+        let source = std::path::absolute(source).unwrap();
+        std::fs::write(program.with_extension("d"), format!("{}: {}\n", program.display(), source.display())).unwrap();
+    };
+    let other = d.path().join("other/src/main.rs");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "fn main() {}\n").unwrap();
+    record(&other);
+    let (decoy_ws, root) = (ws.clone(), ws.root.clone());
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.open_workspace(decoy_ws);
+        a
+    });
+    assert!(wait(&mut h, |a| a.facts.root == root), "the project is read");
+    assert!(!h.state().facts.program, "another project's program of that name isn't this one's");
+
+    record(&app.join("src/main.rs"));
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.open_workspace(ws);
+        a
+    });
+    assert!(wait(&mut h, |a| a.facts.program), "the member's build is found");
+    h.run_steps(2);
+    h.get_by_label("Pin this build");
+}
