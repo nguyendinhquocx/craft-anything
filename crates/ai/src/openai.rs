@@ -273,13 +273,17 @@ impl OpenAi {
         let arr = v.get("data").or_else(|| v.get("models")).and_then(Value::as_array).cloned().unwrap_or_default();
         // A catalogue may list a model only for another API (Responses, Messages): such an entry
         // would fail on a chat-completions client, so skip it when the entry says which APIs it
-        // serves. Empty and repeated ids are dropped too.
+        // serves (a null "api" says nothing). A catalogue that names the API as text ("chat") lists chat models. Empty and
+        // repeated ids are dropped too, and so are ids with control characters.
         let mut out: Vec<String> = Vec::new();
         for m in arr {
-            if m.get("api").is_some_and(|a| a.get("chat-completions").is_none()) {
+            if m.get("api")
+                .filter(|a| !a.is_null())
+                .is_some_and(|a| if let Some(api) = a.as_str() { api != "chat" } else { a.get("chat-completions").is_none() })
+            {
                 continue;
             }
-            let Some(id) = m.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else { continue };
+            let Some(id) = m.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) else { continue };
             if !out.iter().any(|seen| seen == id) {
                 out.push(id.to_string());
             }
@@ -363,6 +367,9 @@ pub fn messages_json(m: &Msg, react: bool) -> Vec<Value> {
         Speaker::User => {
             let mut out = Vec::new();
             let mut text = String::new();
+            // With a picture the message's content becomes a list of parts, in order; without
+            // one it stays a plain string, as every server takes.
+            let mut parts: Vec<Value> = Vec::new();
             for b in &m.blocks {
                 match b {
                     Block::Text { text: t } => text.push_str(t),
@@ -374,11 +381,25 @@ pub fn messages_json(m: &Msg, react: bool) -> Vec<Value> {
                             out.push(json!({"role": "tool", "tool_call_id": tool_use_id, "content": content}));
                         }
                     }
+                    Block::Image { data, name, .. } if data.is_empty() => text.push_str(&Block::image_note(name)),
+                    Block::Image { media_type, data, .. } => {
+                        if !text.is_empty() {
+                            parts.push(json!({"type": "text", "text": std::mem::take(&mut text)}));
+                        }
+                        parts.push(json!({"type": "image_url", "image_url": {"url": format!("data:{media_type};base64,{data}")}}));
+                    }
                     _ => {}
                 }
             }
-            if !text.is_empty() {
-                out.push(json!({"role": "user", "content": text}));
+            if parts.is_empty() {
+                if !text.is_empty() {
+                    out.push(json!({"role": "user", "content": text}));
+                }
+            } else {
+                if !text.is_empty() {
+                    parts.push(json!({"type": "text", "text": text}));
+                }
+                out.push(json!({"role": "user", "content": parts}));
             }
             out
         }

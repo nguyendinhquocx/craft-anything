@@ -132,6 +132,7 @@ const ACTIONS: &[Action] = &[
     a("open_path",           "open an app or file as the target",              Tool(&["core_target_open"])),
     a("first_look",          "a first look at the target",                     Tool(&["core_target_triage"])),
     a("Home › Open a website", "open a web page as the target",                Tool(&["web_site_open"])),
+    a("sign_in_to_site",     "sign in to a website so studies see it signed in", Tool(&["web_site_sign_in"])),
     a("Workbench › Targets", "switch between open targets",                    Tool(&["core_target_select", "core_targets_list"])),
     a("send",                "ask about the target",                           Cli("chat <question> --target")),
     a("answer_consent",      "allow or refuse running a program",              Cli("tool <id> --allow-run")),

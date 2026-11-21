@@ -1328,6 +1328,7 @@ dependencies = [
 name = "craft-anything-ai"
 version = "0.6.1"
 dependencies = [
+ "base64 0.22.1",
  "craft-anything-engine",
  "craft-anything-engines",
  "craft-anything-evidence",
@@ -1810,7 +1811,7 @@ dependencies = [
 [[package]]
 name = "craft-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=f428c3d36e0faf3924b76956a01334c051543527#f428c3d36e0faf3924b76956a01334c051543527"
+source = "git+https://github.com/storytold/craft-libs?rev=0350c2edc0d6455c63ead4d48c83b9d262d0cb93#0350c2edc0d6455c63ead4d48c83b9d262d0cb93"
 
 [[package]]
 name = "craft-tar"

@@ -256,7 +256,7 @@ fn main() {
             let mut u = craft_anything_engine::workspace::ProjectUsage { work_ms: 725_000, ..Default::default() };
             u.add_turn(1_180_000, 42_000, Some(3.21), true);
             if let Some(root) = a.workspace.as_ref().map(|w| w.root.clone()) {
-                a.usage.insert(root, craft_anything_ui_egui::usage::ProjectClock { saved: u.clone(), since: None });
+                a.usage.insert(root, craft_anything_ui_egui::usage::ProjectClock { saved: u.clone(), since: None, unreadable: false });
             }
             a.session_usage = u;
             a

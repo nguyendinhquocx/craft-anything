@@ -341,16 +341,18 @@ impl Http {
     /// POSTs `msg`, giving up at `deadline` across every redirect hop and before resending once
     /// `cancelled` says so.
     fn post(&mut self, msg: &Value, deadline: Instant, cancelled: &dyn Fn() -> bool) -> Result<ureq::http::Response<ureq::Body>, ToolError> {
+        // Redirects are followed by hand below, for https too: each target is checked before the
+        // body is sent again, and the configured headers and session go only to the configured
+        // server. With no redirects allowed, ureq returns a 3xx answer as it is.
         let mut builder = ureq::Agent::config_builder()
             .https_only(self.https)
             .http_status_as_error(false)
+            .max_redirects(0)
             .user_agent("CraftAnything")
             .timeout_connect(Some(Duration::from_secs(20)));
         if !self.https {
             // Plain HTTP is allowed only to loopback, so no proxy may carry it off this computer.
-            // Redirects are followed by hand below, so one that leaves this computer is refused
-            // before the headers and body are sent again.
-            builder = builder.max_redirects(0).proxy(None);
+            builder = builder.proxy(None);
         }
         #[cfg(test)]
         if let Some(tls) = &self.tls {
@@ -408,20 +410,13 @@ impl Http {
                     .with_remediation("Check its url in config.toml ([[plugins.mcp]]) and your connection.")
             })?;
             let status = resp.status().as_u16();
-            if self.https || !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            if !matches!(status, 301 | 302 | 303 | 307 | 308) {
                 break resp;
             }
             let Some(next) = resp.headers().get("location").and_then(|v| v.to_str().ok()).and_then(|l| resolve_location(&url, l)) else {
                 break resp;
             };
-            // The target stays out of these errors: it can carry tokens or signed parameters.
-            if !(next.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("http:")) && url_allowed(&next)) {
-                return Err(ToolError::new(
-                    ErrorCode::EngineMissing,
-                    format!("The {} plugin redirected to an address other than http:// on this computer, and was refused.", self.name),
-                )
-                .with_remediation("Set its url in config.toml ([[plugins.mcp]]) to the final address, or keep its redirects on this computer."));
-            }
+            next_hop_allowed(&self.name, self.https, &next)?;
             // 301, 302 and 303 turn a POST into a GET, which can't carry an MCP message.
             if !matches!(status, 307 | 308) {
                 break resp;
@@ -441,7 +436,7 @@ impl Http {
                 // The session would have to be sent to an address that wasn't configured.
                 return Err(ToolError::new(
                     ErrorCode::EngineMissing,
-                    format!("The {} plugin redirected to another address on this computer that started a session, which isn't followed.", self.name),
+                    format!("The {} plugin redirected to another address that started a session, which isn't followed.", self.name),
                 )
                 .with_remediation("Set its url in config.toml ([[plugins.mcp]]) to the final address."));
             }
@@ -514,8 +509,37 @@ impl Transport for Http {
     }
 }
 
-/// Redirects a plain HTTP plugin on this computer may take for one message.
+/// Redirects a plugin may take for one message.
 const MAX_REDIRECTS: usize = 5;
+
+/// Whether a plugin may be sent its message again at `next`, the target of a redirect: for an
+/// https plugin it must be `https:` and pass [`url_allowed`] (a redirect to plain HTTP is
+/// refused); for a plain-http plugin it must be `http:` on this computer. The target stays out
+/// of every error: it can carry tokens or signed parameters.
+fn next_hop_allowed(name: &str, https: bool, next: &str) -> Result<(), ToolError> {
+    let Some(scheme) = next.parse::<ureq::http::Uri>().ok().and_then(|u| u.scheme_str().map(str::to_ascii_lowercase)) else {
+        return Err(ToolError::new(
+            ErrorCode::EngineMissing,
+            format!("The {name} plugin sent an HTTP answer that couldn't be read, such as a malformed redirect."),
+        )
+        .with_remediation("Check its url in config.toml ([[plugins.mcp]]) and the server's redirects."));
+    };
+    match (https, scheme.as_str()) {
+        (true, "https") | (false, "http") if url_allowed(next) => Ok(()),
+        (true, "http") => Err(ToolError::new(ErrorCode::EngineMissing, format!("The {name} plugin redirected to plain HTTP and was refused."))
+            .with_remediation("Keep every redirect for a remote MCP plugin on HTTPS.")),
+        (true, _) => Err(ToolError::new(
+            ErrorCode::EngineMissing,
+            format!("The {name} plugin redirected to an address that isn't a valid https:// address, and was refused."),
+        )
+        .with_remediation("Set its url in config.toml ([[plugins.mcp]]) to the final address.")),
+        (false, _) => Err(ToolError::new(
+            ErrorCode::EngineMissing,
+            format!("The {name} plugin redirected to an address other than http:// on this computer, and was refused."),
+        )
+        .with_remediation("Set its url in config.toml ([[plugins.mcp]]) to the final address, or keep its redirects on this computer.")),
+    }
+}
 
 /// Resolves a `Location` header against the URL that answered it: absolute, scheme-relative,
 /// absolute-path, query-only, fragment-only, or path-relative, with `.` and `..` segments removed (RFC 3986
@@ -1188,21 +1212,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-        let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert = key.cert.der().clone();
-        let private = rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der());
-        let server_cfg = Arc::new(
-            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(vec![cert.clone()], private.into())
-                .unwrap(),
-        );
-        let client_tls = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(cert.as_ref()).to_owned()]))
-            .build();
-
+        let (server_cfg, client_tls) = localhost_tls();
         let http_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         http_listener.set_nonblocking(true).unwrap();
         let http_port = http_listener.local_addr().unwrap().port();
@@ -1263,5 +1273,171 @@ mod tests {
         http_worker.join().unwrap();
 
         (res.err().unwrap(), https_seen.load(Ordering::SeqCst), http_seen.load(Ordering::SeqCst))
+    }
+
+    /// A self-signed certificate for `localhost`: the server's side, and a client that trusts it.
+    fn localhost_tls() -> (std::sync::Arc<rustls::ServerConfig>, ureq::tls::TlsConfig) {
+        use std::sync::Arc;
+        let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = key.cert.der().clone();
+        let private = rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der());
+        let server_cfg = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone()], private.into())
+                .unwrap(),
+        );
+        let client_tls = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(cert.as_ref()).to_owned()]))
+            .build();
+        (server_cfg, client_tls)
+    }
+
+    /// A TLS server for `localhost` on a loopback port. It reads each whole request, answers it
+    /// with `reply(path)`, and returns every request it read (head and body, lowercased). It
+    /// stops after `accepts` requests, once `stop` is set, or after ten seconds.
+    fn tls_server(
+        cfg: std::sync::Arc<rustls::ServerConfig>,
+        accepts: usize,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        reply: impl Fn(&str) -> String + Send + 'static,
+    ) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut seen = Vec::new();
+            while seen.len() < accepts && !stop.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
+                let Ok((socket, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                // An accepted socket keeps the listener's nonblocking mode on Windows.
+                socket.set_nonblocking(false).unwrap();
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+                let _ = socket.set_write_timeout(Some(Duration::from_secs(3)));
+                let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(cfg.clone()).unwrap(), socket);
+                let request = drain_http_request(&mut tls).to_ascii_lowercase();
+                let path = request.split(' ').nth(1).unwrap_or_default().to_string();
+                seen.push(request);
+                let _ = tls.write_all(reply(&path).as_bytes());
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            }
+            seen
+        });
+        (port, handle)
+    }
+
+    fn answer_ok() -> String {
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string()
+    }
+
+    fn answer_moved(status: &str, location: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    /// An https plugin at `port` with a key in its headers and a session already started.
+    fn https_to(port: u16, tls: ureq::tls::TlsConfig) -> Http {
+        let headers = BTreeMap::from([("X-Api-Key".to_string(), "sk-test".to_string())]);
+        let mut http = Http::new("secure", &ServerUrl { url: format!("https://localhost:{port}/mcp"), headers }).unwrap();
+        http.tls = Some(tls);
+        http.session = Some("s-1".into());
+        http
+    }
+
+    fn list_message() -> Value {
+        json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list", "params": {}})
+    }
+
+    fn stop_flag() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// An https plugin redirected with a 307 to another https address sends it the message again,
+    /// but not its configured headers or its session.
+    #[test]
+    fn https_redirect_to_another_origin_drops_configured_headers() {
+        let (cfg, tls) = localhost_tls();
+        let stop = stop_flag();
+        let (other, other_seen) = tls_server(cfg.clone(), 1, stop.clone(), |_| answer_ok());
+        let target = format!("https://localhost:{other}/mcp");
+        let (home, home_seen) = tls_server(cfg, 1, stop.clone(), move |_| answer_moved("307 Temporary Redirect", &target));
+        let res = https_to(home, tls).post(&list_message(), soon(Duration::from_secs(10)), &|| false);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (home_seen, other_seen) = (home_seen.join().unwrap(), other_seen.join().unwrap());
+        assert!(res.is_ok(), "{:?}", res.err());
+        assert_eq!((home_seen.len(), other_seen.len()), (1, 1), "{home_seen:?} {other_seen:?}");
+        assert!(home_seen[0].contains("x-api-key: sk-test") && home_seen[0].contains("mcp-session-id: s-1"), "{home_seen:?}");
+        assert!(!other_seen[0].contains("x-api-key") && !other_seen[0].contains("mcp-session-id"), "{other_seen:?}");
+        assert!(other_seen[0].contains("\"method\":\"tools/list\""), "the message must be sent again: {other_seen:?}");
+    }
+
+    /// A 307 to another path on the configured https address keeps the headers and the session.
+    #[test]
+    fn https_redirect_on_the_same_origin_keeps_configured_headers() {
+        let (cfg, tls) = localhost_tls();
+        let stop = stop_flag();
+        let (home, seen) =
+            tls_server(cfg, 2, stop.clone(), |path| if path == "/mcp" { answer_moved("307 Temporary Redirect", "/mcp/v2") } else { answer_ok() });
+        let res = https_to(home, tls).post(&list_message(), soon(Duration::from_secs(10)), &|| false);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let seen = seen.join().unwrap();
+        assert!(res.is_ok(), "{:?}", res.err());
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[1].starts_with("post /mcp/v2 "), "{seen:?}");
+        assert!(seen.iter().all(|r| r.contains("x-api-key: sk-test") && r.contains("mcp-session-id: s-1")), "{seen:?}");
+    }
+
+    /// A 307 from an https plugin to plain HTTP is refused before anything is sent there, and the
+    /// error doesn't show the target. So is a 307 to an https address `url_allowed` refuses.
+    #[test]
+    fn https_redirects_to_refused_targets_are_not_followed_or_shown() {
+        let plain = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        plain.set_nonblocking(true).unwrap();
+        let plain_port = plain.local_addr().unwrap().port();
+        for (target, said) in [
+            (format!("http://127.0.0.1:{plain_port}/mcp?sig={PRIVATE_SIG}"), "plain HTTP"),
+            (format!("https://user@localhost:{plain_port}/mcp?sig={PRIVATE_SIG}"), "isn't a valid https:// address"),
+        ] {
+            let (cfg, tls) = localhost_tls();
+            let stop = stop_flag();
+            let (home, seen) = tls_server(cfg, 1, stop.clone(), move |_| answer_moved("307 Temporary Redirect", &target));
+            let err = https_to(home, tls).post(&list_message(), soon(Duration::from_secs(10)), &|| false).err().unwrap();
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(seen.join().unwrap().len(), 1);
+            assert!(err.message.contains(said), "{err:?}");
+            assert!(!format!("{err:?}").contains(PRIVATE_SIG), "redirect target query leaked: {err:?}");
+        }
+        assert!(plain.accept().is_err(), "a refused target must not be contacted");
+    }
+
+    /// An https plugin follows at most `MAX_REDIRECTS` redirects for one message.
+    #[test]
+    fn https_redirects_stop_after_the_limit() {
+        let (cfg, tls) = localhost_tls();
+        let stop = stop_flag();
+        let (home, seen) = tls_server(cfg, MAX_REDIRECTS + 2, stop.clone(), |path| answer_moved("307 Temporary Redirect", &format!("{path}x")));
+        let err = https_to(home, tls).post(&list_message(), soon(Duration::from_secs(10)), &|| false).err().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(err.message.contains(&format!("more than {MAX_REDIRECTS} times")), "{err:?}");
+        assert_eq!(seen.join().unwrap().len(), MAX_REDIRECTS + 1);
+    }
+
+    /// A 302 would turn the POST into a GET, so an https plugin returns it as it is.
+    #[test]
+    fn an_https_302_is_returned_not_followed() {
+        let (cfg, tls) = localhost_tls();
+        let stop = stop_flag();
+        let (other, other_seen) = tls_server(cfg.clone(), 1, stop.clone(), |_| answer_ok());
+        let target = format!("https://localhost:{other}/mcp");
+        let (home, home_seen) = tls_server(cfg, 1, stop.clone(), move |_| answer_moved("302 Found", &target));
+        let err = https_to(home, tls).post(&list_message(), soon(Duration::from_secs(10)), &|| false).err().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(err.message.contains("answered 302"), "{err:?}");
+        assert_eq!((home_seen.join().unwrap().len(), other_seen.join().unwrap().len()), (1, 0));
     }
 }

@@ -968,6 +968,80 @@ fn website_choice_stays_picked_while_the_address_is_empty() {
     assert!(h.query_by_label("Type the website's address:").is_none());
 }
 
+/// A website typed on Make can be signed in to from there (`web_site_sign_in`), one sign-in at a
+/// time, and Start waits until it's over.
+#[test]
+fn a_website_is_signed_in_to_from_make() {
+    let store = tempfile::tempdir().unwrap();
+    let store_dir = store.path().to_path_buf();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        // No browser here: only the path set (not there) and an empty engine store are looked at,
+        // so the sign-in fails at once, as on a computer without one, and no window opens. The
+        // app hands its settings to the session, so both get them.
+        let engines = &mut a.settings.engines;
+        engines.only_configured = true;
+        engines.store_dir = Some(store_dir);
+        engines.tools.chromium = Some("/nowhere/chromium".into());
+        a.engine.session().settings.engines = a.settings.engines.clone();
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("A website").click();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "no address yet");
+    h.state_mut().state.make.url = "two words.com".into();
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none(), "not an address a sign-in can be saved for");
+    h.state_mut().state.make.url = "example.com".into();
+    h.state_mut().state.make.request = "Recreate this website".into();
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_some(), "the sign-in started");
+    assert!(wait(&mut h, |a| a.signing_in.is_none()), "and ended");
+    assert!(
+        h.state().state.toasts.iter().any(|(t, err)| *err && t.starts_with("example.com: Couldn't sign in to the site.") && t.contains("chromium")),
+        "{:?}",
+        h.state().state.toasts
+    );
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site");
+
+    // Not while a new project is being made: its build would study the site before the sign-in ends.
+    h.state_mut().creating = Some(u64::MAX);
+    h.run_steps(2);
+    h.get_by_label("Sign in to this site").click();
+    h.run_steps(1);
+    assert!(h.state().signing_in.is_none(), "no sign-in while a project is made");
+    h.state_mut().sign_in_to_site("https://example.com");
+    assert!(h.state().signing_in.is_none(), "nor from elsewhere");
+    h.state_mut().creating = None;
+
+    // While a sign-in window is open: no second one, a way to stop waiting, and Start waits.
+    h.state_mut().signing_in = Some(u64::MAX);
+    h.run_steps(2);
+    assert!(h.query_by_label("Sign in to this site").is_none());
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Start").click();
+    h.run_steps(2);
+    assert!(h.state().creating.is_none(), "nothing starts before the sign-in is over");
+    assert_eq!(h.state().state.screen, Screen::Home);
+    // Nor from the other ways a start is reached (a builder picked, an engine got).
+    h.state_mut().start_make();
+    h.run_steps(1);
+    assert!(h.state().creating.is_none());
+    assert!(h.state().state.toasts.iter().any(|(t, _)| t == "Finish signing in to the site first."), "{:?}", h.state().state.toasts);
+    // The way out stays while the address changes or another kind of original is picked.
+    h.state_mut().state.make.url.clear();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    h.get_by_label("Nothing — start fresh").click();
+    h.run_steps(2);
+    h.get_by_label("Stop waiting");
+    assert!(h.query_by_label("Sign in to this site").is_none());
+}
+
 /// Make's Simple / Advanced switch changes the app's mode and keeps the screen and the draft (#1286).
 #[test]
 fn the_make_card_switches_simple_and_advanced_and_keeps_the_draft() {
@@ -1018,6 +1092,42 @@ fn the_make_mode_switch_stays_inside_the_narrowest_window() {
             assert!(part.left() >= 0.0 && part.right() <= width, "at {width}: {part:?} leaves the window");
         }
     }
+}
+
+/// Switching modes changes what is shown, not how big it is: both use the type scale's sizes.
+#[test]
+fn simple_and_advanced_use_the_same_text_sizes() {
+    let mut h = harness(|| demo::app(demo::engine(Mode::Beginner, true)));
+    h.run_steps(3);
+    // Every text style (Body, Small, Button, Heading, Monospace) and all of egui's spacing:
+    // padding, gaps, control sizes and margins.
+    let sizes = |h: &Harness<'static, CraftApp>| {
+        let style = h.ctx.global_style();
+        (style.text_styles.clone(), style.spacing.clone())
+    };
+    let simple = sizes(&h);
+    let body = simple.0.get(&egui::TextStyle::Body).map(|f| f.size);
+    assert_eq!(body, Some(craft_anything_ui_egui::theme::BODY), "body text is the scale's BODY");
+    assert_eq!(simple.0.len(), 5, "the five text styles are all set: {:?}", simple.0.keys());
+    h.state_mut().set_mode(Mode::Experienced);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "Advanced draws text and controls at the same sizes");
+    // Review of #1236: back again after the theme and the zoom changed in Advanced. The theme is
+    // applied again, the zoom stays the person's, and the sizes still match.
+    h.state_mut().settings.theme = "studio-light".into();
+    h.ctx.set_zoom_factor(1.5);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "another theme keeps the sizes");
+    h.state_mut().set_mode(Mode::Beginner);
+    h.run_steps(3);
+    assert_eq!(sizes(&h), simple, "Simple again, after a theme and zoom change, draws at the same sizes");
+    assert_eq!(h.ctx.zoom_factor(), 1.5, "switching modes leaves the zoom as it was");
+    h.ctx.set_zoom_factor(1.0);
+    h.run_steps(2);
+    // Larger text is zoom's job now, and the Mode row says how.
+    h.state_mut().state.settings_open = true;
+    h.run_steps(3);
+    h.get_by_label("Text bigger or smaller: Ctrl/⌘ + and Ctrl/⌘ −. Ctrl/⌘ 0 resets it.");
 }
 
 #[test]
@@ -2074,6 +2184,42 @@ fn settings_controls_change_builds_art_and_studying() {
     h.get_by_label("Run to study").click();
     h.run_steps(2);
     assert!(h.state().settings.runtime_study);
+}
+
+/// #2153: arguments in square brackets that aren't a list of quoted words are refused with a
+/// sentence saying what's taken, and Add does nothing until they're fixed.
+#[test]
+fn a_plugins_bad_argument_list_is_refused_until_fixed() {
+    use egui_kittest::kittest::NodeT;
+    const PROBLEM: &str =
+        r#"Arguments in square brackets must be a list of quoted words, like ["--port", "8080"]. Or leave out the brackets and separate them with spaces."#;
+    let mut h = harness(|| {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        a.state.settings_open = true;
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("Plugins").click();
+    h.run_steps(3);
+    for (field, text) in [("Plugin id", "ls"), ("Plugin command or address", "server"), ("Plugin arguments", r#"["--stdio", "--port",]"#)] {
+        h.get_by_label(field).focus();
+        h.run_steps(1);
+        h.get_by_label(field).type_text(text);
+        h.run_steps(2);
+    }
+    assert_eq!(h.state().state.plugin_form.args, r#"["--stdio", "--port",]"#);
+    h.get_by_label(PROBLEM);
+    assert!(h.get_by_label("Add").accesskit_node().is_disabled(), "Add is off while the list is bad");
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    assert_eq!(h.state().state.plugin_form.id, "ls", "a click on Add leaves the form as it is");
+    assert_eq!(h.state().state.plugin_form.params(), None);
+    // Fixed (the trailing comma gone), the message goes and the plugin's arguments are the list.
+    h.state_mut().state.plugin_form.args = r#"["--stdio", "--port"]"#.into();
+    h.run_steps(3);
+    assert!(h.query_by_label(PROBLEM).is_none(), "the message goes once the list is fixed");
+    assert!(!h.get_by_label("Add").accesskit_node().is_disabled(), "Add is on once the list is fixed");
+    assert_eq!(h.state().state.plugin_form.params(), Some(serde_json::json!({"id": "ls", "command": "server", "args": ["--stdio", "--port"]})));
 }
 
 #[test]

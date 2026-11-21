@@ -521,8 +521,8 @@ const SCROLL_THUMB_AT_REST: f32 = 0.5;
 /// two or three turns for what a browser scrolls in one; it still eases to the new place.
 pub const WHEEL_STEP: f32 = 100.0;
 
-/// Apply a theme. `roomy` = Beginner mode (bigger type, more air).
-pub fn apply(ctx: &egui::Context, kind: ThemeKind, roomy: bool) {
+/// Apply a theme: its colours, and the one set of text sizes and spacing both modes use.
+pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
     let t = Tokens::for_kind(kind);
     ctx.data_mut(|d| d.insert_temp(tokens_id(), t));
     ctx.set_theme(if t.dark() { egui::Theme::Dark } else { egui::Theme::Light });
@@ -576,23 +576,25 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind, roomy: bool) {
         wv.expansion = 0.0;
     }
     ctx.set_visuals(v);
-    // Simple mode is for anyone, including people who find small text hard to read. egui's own
-    // controls (combo boxes, menu rows) are as tall as ours of the mode's size, with its label.
-    let control = if roomy { ControlSize::Medium } else { ControlSize::Small };
+    // One set of sizes for both modes, Simple's, so switching modes changes what is shown, not
+    // how big it is: zoom (Cmd/Ctrl + / −) makes everything bigger. Simple is for anyone,
+    // including people who find small text hard to read. egui's own controls (combo boxes,
+    // menu rows) are as tall as a medium control, with its label.
+    let control = ControlSize::Medium;
     ctx.global_style_mut(|s| {
         s.text_styles = [
-            (TextStyle::Small, FontId::proportional(if roomy { LABEL } else { TINY })),
-            (TextStyle::Body, FontId::proportional(if roomy { BODY } else { LABEL })),
+            (TextStyle::Small, FontId::proportional(LABEL)),
+            (TextStyle::Body, FontId::proportional(BODY)),
             (TextStyle::Button, FontId::proportional(control.text())),
-            (TextStyle::Heading, semibold(if roomy { SECTION } else { CARD })),
-            (TextStyle::Monospace, FontId::monospace(if roomy { LABEL } else { CODE })),
+            (TextStyle::Heading, semibold(SECTION)),
+            (TextStyle::Monospace, FontId::monospace(LABEL)),
         ]
         .into();
-        s.spacing.item_spacing = egui::vec2(space::SM, if roomy { space::SM } else { space::XS });
+        s.spacing.item_spacing = egui::vec2(space::SM, space::SM);
         // Padding that brings a line of the label up to the control's height; a row of plain text
         // stays as tall as a small control.
         let pad_y = ((control.height() - control.text() * 1.2) / 2.0).round();
-        s.spacing.button_padding = egui::vec2(if roomy { space::MD } else { space::SM }, pad_y);
+        s.spacing.button_padding = egui::vec2(space::MD, pad_y);
         s.spacing.interact_size = egui::Vec2::splat(ControlSize::Small.height());
         s.spacing.menu_margin = pad::MENU;
         // A dropdown's list shows nine rows and a half before it scrolls: the half row says there's more.

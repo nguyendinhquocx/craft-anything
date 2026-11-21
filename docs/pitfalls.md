@@ -239,6 +239,13 @@ off the UI thread; a UI test that added pictures, ran three frames and then look
 fast machines and failed in CI on unrelated PRs. When work moves to a worker, grep the tests that
 call it and make them `wait` for the result, not `run_steps(n)`.
 
+**An interrupted call read as "nothing answered".** A Cutter test failed once on Linux CI with "No
+Cutter session answered … Interrupted system call": a signal reached the thread (likely another
+test's child ending) during a loopback call, and every error that wasn't a timeout meant "no
+session". An interrupted system call is not an answer: decide on the error's typed kind
+(`ErrorKind::Interrupted`), call again within the same time limit when the request is safe to
+repeat (`platform::retry::when_interrupted`), and otherwise say it was interrupted.
+
 **A stand-in server that answers every request in order.** The AI tests' `mock` answered each
 request with the next scripted reply, so when the agent began asking the server for its context
 window before the first chat, that question took the chat's reply. A stand-in says which requests

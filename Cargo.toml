@@ -47,7 +47,7 @@ craft-plist = { git = "https://github.com/storytold/craft-libs", rev = "d118983b
 craft-sniff = { git = "https://github.com/storytold/craft-libs", rev = "d118983bf922ac96c68b885dc55da30435adbc7d" }
 craft-dex = { git = "https://github.com/storytold/craft-libs", rev = "35afed3956e14fb813f8c27bc82d65c2bce00028" }
 craft-pkcs7 = { git = "https://github.com/storytold/craft-libs", rev = "1acd07f6bc48b04df49aa00e1c3852b159151d63" }
-craft-sqlite = { git = "https://github.com/storytold/craft-libs", rev = "f428c3d36e0faf3924b76956a01334c051543527" }
+craft-sqlite = { git = "https://github.com/storytold/craft-libs", rev = "0350c2edc0d6455c63ead4d48c83b9d262d0cb93" }
 craft-jsonrpc = { git = "https://github.com/storytold/craft-libs", rev = "512a1b8e8b59a7b325e7f69f6131aa8628470288" }
 craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "512a1b8e8b59a7b325e7f69f6131aa8628470288" }
 craft-dds = { git = "https://github.com/storytold/craft-libs", rev = "429937ad72e16fa2bb5a9f085dee80809e4a566d" }

@@ -132,6 +132,9 @@ cheapest help we can give anyone, so nothing below should hold it up for long.
 - [x] A start that dies before its window (a native driver crash leaves no dialog or log, #74, #104,
       #33) is remembered: `starting` beside `desktop.log` is written before the window is asked for
       and removed once it's open, and a start that finds it draws with WARP that once
+- [x] List `craft-anything-cli` in AppStream metainfo `<provides>` so package managers and software
+      centres know the CLI ships with the package (it is inside the AppImage and Flatpak but not on
+      the host's PATH)
       (`apps/craft-anything/src/start_guard.rs`)
 - [x] Live-check the start fallback on Windows: make a start die before its window (kill the
       process at launch), start again, and see `desktop.log` say it drew without the graphics card
@@ -248,6 +251,10 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       a save could be shown after it, putting the old folder back (in the app too, until the next
       refresh). Snapshots are numbered as they're read and an older one is dropped
       — claimed: bflatastic, branch bugfix/r5.2-stale-backend-snapshots
+- [ ] Two paths are outside that numbering (review of #1721): choosing the builder saves on the
+      UI thread and changes the list without a new number, so a refresh read just before it can
+      still put the old choice back; and the results of a model change and of saved model options
+      aren't filtered at all. Give each the same number, with a test of the order
 - [x] `which::tests::usual_windows_dirs_come_after_path` (platform) failed on Windows with 10
       found, 9 expected ("nothing twice"): #748's second Antigravity folder, counted since #770
 - [x] `capture::console_tests` (platform) timed out now and then with the whole platform suite
@@ -273,8 +280,15 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       keys) when rsa 0.10 lands, and unmaintained `zbus_names`/`zvariant` (Linux-only via keyring
       and accesskit) when those move on. `deny.toml`'s comments pointed at R0.3, which never held
       them; they name this line now — claimed: kuseidos, branch docs/r5.2-deny-points-at-its-own-roadmap-line
-- [ ] Check whether the release workflows still run actions that target Node.js 20. None is named
-      here any more: every job calls `storytold/craft-common-actions@main`, so a fix belongs there
+- [x] Check the Node.js runtime declarations reachable from `.github/workflows/release.yml`.
+      Audited on 2026-11-20 at
+      [craft-common-actions ab4f427](https://github.com/storytold/craft-common-actions/blob/ab4f4278458c4daa3912211f448b3233929d9638/.github/workflows/release.yml):
+      followed the shared composites and exact external action pins. Every reached JavaScript
+      action declares `node24`; the other reached actions are shell composites. This records
+      that `@main` snapshot; recheck after shared workflow or action-pin changes.
+      — claimed: Afloat16, branch docs/r5.2-release-actions-runtime-audit
+- [ ] Check the action runtime declarations reachable from `ci.yml`, `freebsd.yml` and
+      `windows-arm64.yml`; these workflow entry points were outside the `release.yml` audit.
 - [x] Correct STATUS.md's obsolete GUI-only limit: document the shared project feed, engine
       setup, launch and preview tools, with their consent and lifetime limits — PR #1014
       — claimed: Codex, branch docs/r5.2-headless-status
@@ -339,6 +353,18 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       will reach it alone. Format through `cargo xtask fmt [--check]`, which runs rustfmt on the same
       files in batches that fit, and have `ci` use it
       — claimed: FuryNocturn, branch chore/r5.2-fmt-on-windows
+- [x] `AGENTS.md` and `docs/releasing.md` still point at `../craftrules`, which is retired
+      (craft-contrib house rule 13: don't link to it). Point the shared standards at
+      storytold/craft-contrib and drop the private release playbook reference
+      — claimed: Fadlalla-ai, branch docs/r5.2-craft-contrib-links
+- [x] `cutter::tests::sends_the_command_in_the_path` (engines) failed once in CI with "Interrupted
+      system call": a loopback call interrupted by a signal was reported as "no session answered".
+      `cutter::command` now calls again when interrupted (up to 3 calls within the caller's one
+      time limit, through `platform::retry::when_interrupted`); the Cutter command tool, whose
+      commands can change the session, calls once and says the call was interrupted
+      — claimed: tanish2k09, branch bugfix/r5.2-interrupted-loopback-call
+- [ ] `mcp_client.rs`'s `post` reports an interrupted call (EINTR) as "Couldn't reach the plugin"
+      (`EngineMissing`); a JSON-RPC POST isn't safe to send again, so say it was interrupted instead
 
 ### R5.3 A builder that can't make progress stops
 Owner: open · Status: todo
@@ -374,9 +400,18 @@ Every round spends the person's money or quota. One that can't do anything shoul
 - [x] A builder step on an API backend stops after 25 failed build commands in a row (none
       succeeding between), says so and keeps the project (`MAX_FAILED_BUILDS` in `agent.rs`, #399:
       9.4M tokens in 19 minutes of the first stage, never compiled). Try again carries on
-- [ ] An unreadable `usage.json` reads as all zeros (`ProjectUsage::load` in `workspace.rs`), so
-      the cost shown can be $0 for a build that spent money. Say the count is unknown instead, as
-      R2.2's ACP line asks for agents' turns
+- [x] An unreadable `usage.json` no longer reads as all zeros, which could show $0 for a build that
+      spent money. `ProjectUsage::read` tells a missing file (nothing used) from one that can't be
+      read or parsed (`UsageRead::Unreadable`, read through the capped regular-file reader); the
+      project screen shows its time, cost and tokens as Unknown with a tooltip saying why, the
+      project tools give `usage: null` with `usage_unreadable: true`, and a run's update refuses to
+      write over it (before, it replaced the file with this run's counts). Unit tests cover a
+      missing file, bad JSON, an empty file, a folder, an oversized file, no read permission (Unix),
+      a valid file, the tool result and the screen's words
+      — claimed: tanish2k09, branch bugfix/r5.3-unreadable-usage
+- [ ] An unreadable `usage.json` now stops a project's usage from being counted at all (every
+      update is refused and logged). Say so where the person can act on it, for example offer to
+      set the file aside and start counting again
 - [ ] Show what the last run used next to Try again. `usage.json` keeps project totals only
       (time, tokens, `cost_usd`, `api_billed_usd`); the activity log has each turn's tokens but
       no cost, since a resumed agent's figure can't be tied to one turn (`activity.rs`). Show
@@ -628,6 +663,25 @@ been run live.
       on a helper thread and the wait checks the job's cancel, so Stop beside "Connecting to…"
       ends it at once (`AiHub::add_server_until`); the request given up on ends by its own limits
       — claimed: FuryNocturn, branch bugfix/r5.4-stop-adding-a-server
+- [x] A builder on an API backend can't be shown a picture: the model layer has no image block, so
+      the check's screenshot and the person's pictures of the original never reach the model, local
+      or paid, and every API builder is treated as blind. Add an image block that each API sends
+      the way it expects (OpenAI-style `image_url` data URIs, Anthropic's image source), capped in
+      size, kept out of saved transcripts as bytes, and counted toward the context budget
+      — claimed: youkaicountry, branch feature/r5.4-pictures-to-models
+- [ ] Say per AI whether its model sees pictures (`vision = auto | yes | no`; Auto asks the
+      server: llama.cpp's `/props` modalities, Ollama's capabilities), and let a builder whose model
+      sees get the check's screenshot and the person's pictures attached to its next message
+- [ ] Shrink a picture larger than `MAX_IMAGE_BYTES` (3.75 MB) before it's shown to a model,
+      instead of refusing it (a 4K screenshot as PNG can be larger)
+- [ ] Before pictures reach a builder, bound a request's pictures as a whole (how many and their
+      total size: `MAX_IMAGE_BYTES` bounds each one alone) and keep to each provider's own limits
+      on a picture's size and dimensions (review of #1175)
+- [ ] Test pictures with real PNG, JPEG, WebP and GIF files that decode, sent to a provider that
+      takes them: today's fixtures are magic bytes, so they test the type and the wire format, not
+      the picture. Test several live and resumed pictures interleaved with text too, since the
+      content array keeps their order. The 1,600-token estimate per picture isn't every model's
+      cost (review of #1175)
 
 ### R5.5 API-key builds fail in words people can use
 Owner: open · Status: todo
@@ -1006,6 +1060,17 @@ Owner: open · Status: in progress
       stay on this computer (`crates/engines/src/mcp_client.rs`).
       Unit-tested with local HTTP and TLS servers.
       — claimed: Plastic-time, branch bugfix/r1.5-mcp-http-cleartext-guard
+- [x] An https plugin's redirects were followed by the HTTP library's defaults (review of
+      #2098), so a configured header, such as an API key, could be sent on to another https host.
+      They're now followed by hand as the plain-http path's are (`max_redirects(0)` for both):
+      `307`/`308` only, at most 5 hops in one deadline, each target checked by
+      `next_hop_allowed` (https and `url_allowed`; plain HTTP refused as a downgrade), and the
+      configured headers and session only to the configured origin. Unit-tested with local TLS
+      servers (another origin gets the body without the key or session, the same origin keeps
+      both, refused targets aren't contacted or shown, the hop limit, a `302` not followed)
+      — claimed: tanish2k09, branch bugfix/r1.5-https-plugin-redirects
+- [ ] Live-check an https MCP plugin against a real server that redirects (to another path and
+      to another host), and that the system proxy still carries https plugin requests
 - [ ] More pins once their hashes are checked against the publisher: Chromium (no published
       checksums found yet), Rizin for Linux (the tar.xz unpacks to ~800 MB, so it needs streaming
       extraction) and macOS (a .pkg)
@@ -1508,6 +1573,13 @@ Owner: open · Status: in progress
 - [ ] Hold the self-test to what the check can see too: picture the game after its scripted
       input and require it to differ from the `--screenshot` picture (a report alone is the
       build's own word)
+- [ ] An accessibility floor the person can turn on: unnamed controls, pictures with no `alt`
+      attribute (an empty `alt` marks a decorative picture and passes) and a missing page
+      language judged on the build alone. `health_notes` (`kinds/website.rs`)
+      flags them only where the build is worse ("Problems the original has too aren't the
+      build's to fix."). The `a11y` block survives Clean room (`visitor_view` keeps it).
+      Passing it is a floor, not an accessibility audit. Test on a page where the original
+      and the build share a barrier
 
 ### R2.7 The request decides how to build
 Owner: open · Status: in progress
@@ -1534,6 +1606,9 @@ Owner: open · Status: in progress
 - [x] Run the Go row of `[[toolchain]]` on a real existing project on macOS. The opt-in test
       covers a passing module, a failed test assertion and a build syntax error (Go 1.26.4, arm64)
       — PR #1849; claimed: rudycelekli, branch test/r2.7-real-go-project-checks
+- [ ] That opt-in Go test writes Go's build cache and module folder in the real home when someone
+      runs it (review of #1849). Let the check functions take environment for the child, and give
+      the test a `GOCACHE` and `GOPATH` inside its temp folder
 - [ ] Run the .NET, Maven and Gradle rows of `[[toolchain]]` on real projects, and every row
       on Windows (`windows_program`): Rust, Node.js, Python, Go and Make were run for real, on a Mac
       only. Also a person's own Unity project: it's opened in batch mode, which should exit with
@@ -1572,6 +1647,10 @@ Owner: open · Status: in progress
 - [x] System-tool and media-player phrases keep the app target: "a low level disk tool",
       "an MPEG 2 player" and "a single player app for movies". Independent game cues still apply
       — claimed: Afloat16, branch bugfix/r2.7-media-and-system-apps
+- [ ] When the request names a language, check the page's declared language rather than the
+      original's words: the check lists missing words and the refine message tells the builder
+      to add them (`kinds/website.rs`), so a translated rebuild is told to put them back. A
+      matching declared language doesn't show the words were translated
 
 ### R2.8 Clean room means clean room
 Owner: maintainers · Status: in progress
@@ -1605,6 +1684,16 @@ Gaps found while using the app for real projects.
       JSON array of strings is now taken as the arguments, which also allows an argument with a
       space; anything else is split on spaces as before
       — claimed: bflatastic, branch bugfix/plugin-args-json-array
+- [x] Plugin arguments in square brackets that aren't a JSON array of strings (`[1, 2]`, a
+      trailing comma, a nested list) were split on spaces without a word (#2153, review of #2154).
+      The form now says under its fields that bracketed arguments must be a list of quoted words
+      (or plain words without brackets), and Add stays off until they're fixed; text that doesn't
+      both start and end with a bracket is split on spaces as before, and addresses and `.wasm`
+      files, which take no arguments, aren't stopped by it. Checked by state tests of each case and
+      a UI test that types a bad list, sees the message and a disabled Add, then fixes it
+      — claimed: tanish2k09, branch bugfix/r2.9-plugin-args-bad-list
+- [ ] The plugin form doesn't check that a command exists or that the plugin answers before it's
+      saved; #2153 also asks for that (a found-program check, a test call)
 - [x] Each project chooses, per kind of action, what the builder's approvals get (allow, ask or
       refuse): reading the web, commands, files outside the project, pushing and publishing,
       deleting outside the project, system changes, other tools. Unset kinds follow Auto mode as
@@ -1615,6 +1704,14 @@ Gaps found while using the app for real projects.
       — claimed: tanish2k09, branch feature/r2.9-project-approvals
 - [ ] Agents that don't ask our approval tool (OpenCode `--auto`, Hermes `-z`, Maki's `-p`) aren't
       held to a project's approval choices either; part of R2.2's approval decision
+- [ ] Ask each project why the person is examining the software, starting from their first-run
+      answer, and keep it unknown when they skip the question. Projects made before this read
+      as unknown too: every production
+      `Project::create` passes `Purpose::default()` ("It's mine, or I'm allowed to look"), and the
+      first-run answer stays a UI preference (`Prefs`) that skipped setup leaves at that default.
+      Show it on the approval card for publishing. It is the person's word, not proof
+- [ ] A stated purpose changes nothing except what is displayed: nobody can verify it, so no
+      behaviour depends on it
 - [ ] While "commands" are allowed (Auto mode's default), a builder can run any program. Commands
       that name `craft.json`, the inbox or the approvals tool count as system changes, and our CLI
       started inside an agent calls tools as an agent, but a script that builds the path, or
@@ -1817,6 +1914,16 @@ Gaps found while using the app for real projects.
       display at 2x (#1639). The app now asks the GPU for its own limit, never less than before
       — claimed: bflatastic, branch bugfix/r2.9-gpu-texture-limit
 - [ ] Check #1639 live on a Mac with a display wider than 8192 px (built and checked by CI only)
+- [ ] A window wider than the GPU's own texture limit still can't be drawn (review of #1641): a
+      size saved before a GPU change, or a very wide desktop on a GPU that stops at 8192 px. Keep
+      the window's size in pixels, a restored one and a resized one too, within the limit of the
+      GPU it is drawn with
+- [ ] The macOS app may now send Apple Events to another app the person asks it to control
+      (#1939, #2121). Check on a signed, notarised build that macOS shows its Automation prompt
+      and lists the app under Privacy → Automation, and whether the prompt appears when the
+      request comes through the CLI, which is signed without entitlements
+- [ ] The pin and smoke tests added with #2180 read the real Cargo home and `CARGO_TARGET_DIR`
+      through the process environment; give them a given environment, as the unit tests have
 - [x] "Work on my project" on New project, beside "Make my own version" and "Just look inside":
       pick the folder of a project you already have, say what to change, and its files are edited
       in place, with nothing asked; the project takes the folder's name, an empty folder is
@@ -1840,6 +1947,11 @@ Gaps found while using the app for real projects.
       what the project already has. Checked by a parser test on the result line; the exact line
       Claude Code prints wasn't captured from a live run
       — claimed: bflatastic, branch bugfix/claude-session-too-long
+- [ ] Capture the line Claude Code really prints when its conversation is too long, and decide on
+      a typed field of it if there is one, not on its words (review of #2043)
+- [ ] A note the builder's hook took during a turn that ends with a lost or too-long conversation
+      isn't in the new conversation's first message, though the feed shows it as delivered
+      (review of #2043). Hand such a note on with the fresh start, for a missing session as well
 - [x] `build_file_edit` read the whole project file into memory before replacing text; it now
       uses the same 16 MiB cap as a read, refusing a larger file before it is loaded and leaving
       it unchanged. A file at the cap still edits when the result fits the 8 MB write cap. Engine
@@ -2025,8 +2137,13 @@ Gaps found while using the app for real projects.
       guidance treats saved-profile use as unverified authentication, even without a password page.
       The interactive sign-in runs without holding the engine session lock; same-site profile
       operations fail fast while reserved, without blocking other sites or explicitly fresh opens.
-- [ ] A "Sign in to this site" button in the Make screen for website targets (`web_site_sign_in`
-      is reachable only as a tool, from the CLI, MCP or the agent, today)
+- [x] A "Sign in to this site" button in the Make screen for website targets: a typed address
+      offers it, it runs `web_site_sign_in` for that site (one window at a time, "Stop waiting"
+      cancels the wait), Start waits until it's over, and a message says what was kept. Not run
+      with a real browser window from the app
+      — claimed: mansur-akhmadi, branch feature/r2.9-make-site-sign-in
+- [ ] Make doesn't say whether a sign-in is already saved for the typed site, nor offer to forget
+      it (`web_site_sign_out`); an address found only in the request has no sign-in button
 - [ ] Study with the person's own already-running browser through its debugging endpoint, as an
       alternative to a saved sign-in
 - [ ] Sign in once with `web_site_sign_in` on a real site behind a login (and with the Ubuntu
@@ -2035,6 +2152,14 @@ Gaps found while using the app for real projects.
       than the first sign-in's cookies
 - [ ] Before the builder starts on a signed-in study, show the person the study's first
       screenshots and ask them to confirm it's the signed-in app (Make screen and an inbox approval)
+- [ ] After a website build, list what plain files can't carry over (forms, sign-ins, payments,
+      bookings), read from the capture: Clean room keeps links and form outlines. Copied form
+      markup isn't a working form, and a capture with no form or sign-in link doesn't show the
+      site has none, so keep "seen, not carried over" apart from "not seen". Say which
+      pictures the owner has to supply: the capture saves no picture files, only their
+      addresses, sizes and alt text, and the builder uses placeholders for photos and logos
+      unless the person confirms they own them; fetching or publishing each one is a separate
+      yes
 - [x] A Rust build starts on a computer without Cargo and spends a whole builder turn before
       its build check says cargo is missing (#1837): a new build whose stack names a program
       (`program` in stacks.toml) stops before any turn when it isn't found, saying how to get
@@ -2082,6 +2207,12 @@ Gaps found while using the app for real projects.
       so at 2× zoom in the smallest window (760×520, 380×260 points) its tab list starts off the
       left edge and the dialog runs off the bottom. Fit the dialog to the window, with the tab
       list scrolling when it must (found in #1301's review)
+- [x] Simple and Advanced use one text size and spacing: switching modes changes what is shown, not
+      how big everything is (Simple set 16 pt text and roomier controls, Advanced 13 pt, so the
+      whole window seemed to zoom). Zoom (Cmd/Ctrl + / −) stays the way to make everything bigger.
+      A maintainer's call, made by merging: Simple's larger text was there for people who find
+      small text hard to read, and this leaves that to zoom
+      — claimed: jgt87, branch feature/r2.9-one-size-both-modes — PR #1236
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress
@@ -3422,6 +3553,8 @@ Owner: open · Status: in progress
       and [layers, locks, secret scanning, wasm checks and Cargo.lock stability](https://github.com/Afloat16/claude-mem/actions/runs/42640688213/job/129240669663).
       The [unchanged-code baseline](https://github.com/Afloat16/claude-mem/actions/runs/42636776430/job/129226895582) reproduces the new regression cases.
 
+- [x] Keep GGUF metadata keys and tensor names that aren't UTF-8 distinct (escaped and flagged) instead of inventing replacement identities.
+      — claimed: Plastic-time, branch bugfix/r3.12-gguf-identity-encoding-1112
 - [x] Reject duplicate GGUF metadata keys and tensor names before they overwrite metadata or inflate parameter totals.
       — claimed: Afloat16, branch bugfix/r3.12-gguf-duplicate-identities-20261111
 - [x] Calculate GGUF quantized tensor byte ranges from their block layout and diagnose invalid row widths.
