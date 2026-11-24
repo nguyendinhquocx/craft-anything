@@ -10,10 +10,11 @@ rust-version = "1.97"
 repository = "https://github.com/storytold/craft-anything"
 
 [workspace.dependencies]
-craft-evm = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-java-class = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-har = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-pcap = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-evm = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-java-class = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-android-res = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-har = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-pcap = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
 # internal
 craft-anything-evidence = { path = "crates/evidence" }
 craft-anything-formats = { path = "crates/formats" }
@@ -31,27 +32,27 @@ craft-anything-testkit = { path = "crates/testkit" }
 
 # external
 # Shared unwrapped standard Base64 encoding; decoding keeps format-specific validation.
-craft-mime = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-mime = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
 # Lenient ZIP inspection with all existing compression methods and serialized listings.
-craft-zip = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["lenient", "lenient-bzip2", "lenient-lzma", "lenient-zstd", "serde"] }
+craft-zip = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72", features = ["lenient", "lenient-bzip2", "lenient-lzma", "lenient-zstd", "serde"] }
 # Shared bounded TAR/CPIO listing, including current compatibility fixes.
-craft-tar = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["serde"] }
+craft-tar = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72", features = ["serde"] }
 # XML plist reader; prerequisite craft-libs #1633 (repin after merge).
-craft-elf = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["serde"] }
-craft-pe = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["serde"] }
-craft-macho = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["serde"] }
-craft-jsonc = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-sourcemap = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-wasm = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-plist = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-sniff = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-dex = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-pkcs7 = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-sqlite = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-jsonrpc = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-dds = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
-craft-update = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-elf = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72", features = ["serde"] }
+craft-pe = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72", features = ["serde"] }
+craft-macho = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72", features = ["serde"] }
+craft-jsonc = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-sourcemap = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-wasm = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-plist = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-sniff = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-dex = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-pkcs7 = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-sqlite = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-jsonrpc = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-mcp-server = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-dds = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
+craft-update = { git = "https://github.com/storytold/craft-libs", rev = "cdee9b8ab61832314609563d8a5b6fc19b555b72" }
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
