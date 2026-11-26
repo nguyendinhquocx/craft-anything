@@ -1325,6 +1325,12 @@ failed its check. Text recovery that only knows the formats seen so far ends a t
 the next one: read a model's own call format, and when it names a tool it doesn't have, tell it
 so and name the ones it has, rather than ending.
 
+**A focus check made after the library had let go of focus.** Esc on a project went home
+"unless Esc was meant for a text field", tested with `memory.focused().is_none()`. egui clears
+focus on Esc as the frame begins, before any app code runs, so the check always passed and Esc
+in the prompt box left the project (#2434). Ask about focus as the previous frame ended
+(`text_was_focused`), and test a key with a field focused, not only the key alone.
+
 **A view that asked to be scrolled on every frame.** The command palette called `scroll_to_me` on
 the selected row each frame, so the wheel's scroll was pulled back to it at once and the list
 kept jumping to the top (#584). Scroll something into view on the frame it changed (a key, a new

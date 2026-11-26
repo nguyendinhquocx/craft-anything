@@ -370,8 +370,9 @@ only when it's green and a maintainer has fully reviewed it, code as well as wor
       time limit, through `platform::retry::when_interrupted`); the Cutter command tool, whose
       commands can change the session, calls once and says the call was interrupted
       — claimed: tanish2k09, branch bugfix/r5.2-interrupted-loopback-call
-- [ ] `mcp_client.rs`'s `post` reports an interrupted call (EINTR) as "Couldn't reach the plugin"
+- [x] `mcp_client.rs`'s `post` reports an interrupted call (EINTR) as "Couldn't reach the plugin"
       (`EngineMissing`); a JSON-RPC POST isn't safe to send again, so say it was interrupted instead
+      — claimed: Afloat16, branch bugfix/r5.2-mcp-interrupted-post
 - [x] Every PR that adds UI strings appends them to the end of all 14 catalogs, so any two such
       PRs conflict once one merges (#1465): one folder per language (`i18n/<code>/core.tsv`),
       each PR adding its own file there, joined in name order by `build.rs`
@@ -1116,6 +1117,19 @@ Owner: open · Status: in progress
 - [ ] More pins once their hashes are checked against the publisher: Chromium (no published
       checksums found yet), Rizin for Linux (the tar.xz unpacks to ~800 MB, so it needs streaming
       extraction) and macOS (a .pkg)
+- [x] Use the memory set for Ghidra (`engines.ghidra.memory_gb`, Settings → Engines) below 4 GB too:
+      a set amount was raised to the automatic amount's floor of 4 GB, so a 1-3 GB setting always
+      started Ghidra with `-Xmx4G` (#2425). A set amount is now kept within 1-31 GB
+      (`ghidra::SET_HEAP_GB`); the 4-31 GB range is for the automatic amount only. Both starts (the
+      analysis and the bridge) take it from one place; tested with a stand-in launcher that records
+      `GHIDRA_HEADLESS_MAXMEM`, not run with a real Ghidra
+      (claimed: ilijachrchev, branch bugfix/2425-ghidra-memory)
+- [ ] Ghidra before 12.1 ignores the memory setting: its `support/analyzeHeadless` fixes `MAXMEM=2G`
+      and reads no variable (checked in Ghidra's published 11.0, 11.4, 11.4.2, 12.0 and 12.0.4
+      launchers; 12.1 and 12.1.4 read `GHIDRA_HEADLESS_MAXMEM`). Say so when an older Ghidra is in
+      use, or start it another way that takes a heap
+- [ ] Live check of #2425 with a real Ghidra 12.1.4 or 12.2: `memory_gb = 1` gives `-Xmx1G` for the
+      analysis and the bridge
 
 ### R1.6 Headless first
 Owner: maintainers · Status: in progress
@@ -2397,6 +2411,20 @@ Gaps found while using the app for real projects.
       terminal found npm (#2178): programs are looked up in a PATH whose `%VAR%` entries are
       expanded (`which::expand_vars`), and in Node.js's own install folder after it
       — claimed: justinjohn0306, branch bugfix/2178-npm-on-windows-path
+- [x] The Approvals link under a project's prompt box sat right under Send, so a click a little
+      low opened Approvals instead of sending (#2435). It now starts the row under the box, at the
+      end away from Send, in both the one-row and the two-row layout. A UI test checks the gap at
+      the smallest window, a normal one and 200% zoom, that the row holds still, and that a click
+      or Enter opens the menu
+      - claimed: ilijachrchev, branch bugfix/2435-approvals-link-gap
+- [ ] At the smallest window (760 x 520) and 200% zoom the project screen is 260 points tall, and
+      the row under the prompt box (Approvals, Change it / Just ask) is drawn below the window's
+      bottom edge, out of reach (found while fixing #2435; it was so before that change too)
+- [x] Esc while typing in a project's prompt box stays on the project and keeps the draft; it went
+      to the new-project screen, because egui lets go of a field's focus on Esc before the app
+      looked at it (#2434). Esc with nothing focused still goes home, and still closes the palette,
+      a dialog or Settings first
+      Claimed: ilijachrchev, branch bugfix/2434-esc-in-prompt
 
 ### R2.10 Pinned builds
 Owner: maintainers · Status: in progress
@@ -3859,11 +3887,15 @@ Owner: open · Status: in progress
       decode. Other rendering (no `(extension in …)` prefix, unsupported manglings reported invalid) is unchanged.
       — claimed: Chr0mium24, branch bugfix/r3.12-swift-demangle-generic-spec
 
+- [x] `fD` on a non-class Swift type now reads `deinit` instead of `__deallocating_deinit`: non-class contexts (structs, enums, protocols and their extensions) use `deinit`, while classes keep `__deallocating_deinit`. Example: `_$s13HomeDataModel8StreamedVfD` -> `HomeDataModel.Streamed.deinit`.
+      — claimed: Chr0mium24, branch bugfix/r3.12-swift-demangle-struct-deinit
 
 - [x] Take target file signatures from the shared craft-sniff table. The app still breaks ties
       that need its own parsers (managed PE, Java class versus a universal Mach-O, APK by name
       or manifest, ASAR, text). Fat Mach-O files that start 0xCAFEBABF are now recognized.
       — claimed: FredApps, branch refactor/target-kind-craft-sniff
+- [x] Decode Swift `MS`/`WS`/`…TS` protocol self-conformance symbols: `_$ss5ErrorMS` reads `protocol self-conformance descriptor for Swift.Error`, `_$ss5ErrorWS` reads `protocol self-conformance witness table for Swift.Error`, and `_$ss5ErrorP5_codeSivgTS` reads `protocol self-conformance witness for Swift.Error._code.getter : Swift.Int`.
+      — claimed: Chr0mium24, branch bugfix/r3.12-swift-demangle-self-conformance
 - [x] Swift protocol requirements base descriptors decode. A symbol ending `TL` is the protocol
       requirements base descriptor of the protocol before it, which the demangler reported as an
       unsupported thunk; `_$s7SwiftUI10ShapeStyleTL` is

@@ -988,6 +988,80 @@ mod typed_retries {
         assert_eq!(agent.sent.len(), 1);
     }
 
+    /// #2379: a rate limit is waited out past the three tries, with capped waits, and a failure
+    /// after it still gets its own three.
+    #[test]
+    fn a_rate_limit_is_retried_until_it_lifts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(dir.path(), "x", "Build a thing", TargetRef::None).unwrap();
+        let mut worker = check_worker(&ws, false);
+        let limited = Some(TurnFailure::new(FailureKind::RateLimited));
+        let busy = Some(TurnFailure::new(FailureKind::Transient));
+        let mut agent = FailingConversation::new([limited; 12].into_iter().chain([busy, busy, None]), false);
+        let mut waits = Vec::new();
+        let result = worker.turn_with_wait(&mut ws, &mut agent, "Build it", true, None, |_, seconds| {
+            waits.push(seconds);
+            Ok(())
+        });
+        assert_eq!(result.unwrap(), "Done");
+        assert_eq!(agent.sent.len(), 15, "every rate limit and both busy answers were tried again");
+        assert!(waits[..12].windows(2).all(|w| w[0] <= w[1]) && waits[0] < waits[11] && waits[10] == waits[11], "waits grow, then stop growing: {waits:?}");
+    }
+
+    /// #2379: a limit that never lifts ends the run with its reason, for a coding agent's saved
+    /// session (whose tries can cost money) as for an API, and short waits from the service don't
+    /// use the tries up at once.
+    #[test]
+    fn a_rate_limit_that_never_lifts_stops_the_build() {
+        for saved in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut ws = Workspace::create(dir.path(), "x", "Build a thing", TargetRef::None).unwrap();
+            let mut worker = check_worker(&ws, false);
+            let (tx, rx) = std::sync::mpsc::channel();
+            worker.tx = tx;
+            let failure = TurnFailure { kind: FailureKind::RateLimited, retry_after_secs: Some(1) };
+            let mut agent = FailingConversation::new([Some(failure); 100], saved);
+            let mut waits = Vec::new();
+            let error = worker
+                .turn_with_wait(&mut ws, &mut agent, "Build it", true, None, |_, seconds| {
+                    waits.push(seconds);
+                    Ok(())
+                })
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::ProgramFailed);
+            assert!(error.message.contains("rate limit") && error.message.contains("provider response"), "{error:?}");
+            assert!(agent.sent.len() < 100 && agent.sent.len() == waits.len() + 1, "the last try isn't waited after");
+            assert!(waits[0] < waits[waits.len() - 1], "{waits:?}");
+            let said: Vec<String> = rx.try_iter().filter_map(|e| if let RunEvent::Step { text, .. } = e { Some(text) } else { None }).collect();
+            assert_eq!(said.len(), waits.len());
+            for (text, wait) in said.iter().zip(&waits) {
+                assert!(text.contains("rate limit") && text.contains(&format!("in {wait} s")) && text.contains(&format!("of {}", waits.len())), "{text}");
+            }
+        }
+    }
+
+    /// #2379: Pause pressed during a rate limit's wait ends the run there.
+    #[test]
+    fn a_pause_ends_the_wait_for_a_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::create(dir.path(), "x", "Build a thing", TargetRef::None).unwrap();
+        let mut worker = check_worker(&ws, false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        worker.tx = tx;
+        let stop = worker.stop.clone();
+        let pause = std::thread::spawn(move || {
+            // The step is said right before the wait starts.
+            while !matches!(rx.recv().unwrap(), RunEvent::Step { text, .. } if text.contains("rate limit")) {}
+            std::thread::sleep(Duration::from_millis(100));
+            stop.cancel();
+        });
+        let mut agent = FailingConversation::new([Some(TurnFailure::new(FailureKind::RateLimited))], false);
+        let error = worker.turn(&mut ws, &mut agent, "Build it", true, None).unwrap_err();
+        pause.join().unwrap();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_eq!(agent.sent.len(), 1, "nothing is sent after a pause");
+    }
+
     #[test]
     fn a_local_self_check_write_error_is_not_retried_as_a_backend_rate_limit() {
         #[derive(Clone)]

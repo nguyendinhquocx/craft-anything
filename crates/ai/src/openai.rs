@@ -504,9 +504,8 @@ impl ChatStream {
             let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
             let provider = err.get("code").and_then(Value::as_str).or_else(|| err.get("type").and_then(Value::as_str));
             let status = err.get("code").and_then(Value::as_u64);
-            return Err(
-                ToolError::new(ErrorCode::ProgramFailed, format!("Stream error: {msg}")).with_details(json!({"provider_error": provider, "status": status}))
-            );
+            return Err(ToolError::new(ErrorCode::ProgramFailed, format!("Stream error: {msg}"))
+                .with_details(json!({"provider_error": provider, "status": status, "request_too_large": http::request_too_large(msg)})));
         }
         if let Some(m) = v.get("model").and_then(Value::as_str) {
             self.model = m.to_string();
