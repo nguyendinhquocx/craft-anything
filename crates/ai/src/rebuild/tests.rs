@@ -2197,6 +2197,92 @@ mod picking_up_a_build {
         ws
     }
 
+    #[test]
+    fn a_direct_start_recovers_the_queued_request_without_duplicating_waiting_notes() {
+        let b = bench();
+        let ws = worked_on(&b);
+        let picture = ws.root.join("attachments/search.png");
+        let words = "Add a search box and keep the current layout";
+        let left = notes::Left { text: "Add a search box".into(), shown: "Add search".into(), pictures: vec![picture.clone()], added: None };
+        // The UI already carries these old waiting notes in the queued message. Recovery must
+        // not feed them a second time from inbox/notes, or send the old brief instead.
+        notes::hand_over(&notes::notes_dir(&ws.inbox_dir()), 7, "Add a search box", Some(&left)).unwrap();
+        queued_request::save(
+            &ws,
+            &RunOptions {
+                message: Some(words.into()),
+                shown: Some("Add search".into()),
+                shown_pictures: vec![picture.clone()],
+                carried_notes: vec![notes::Carried { id: 7, note: left }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (ok, feed) = try_it(&b, &ws);
+        assert!(ok);
+        assert!(!studied(&feed), "the restored follow-up keeps the finished study");
+        let prompts = std::fs::read_to_string(&b.prompts).unwrap();
+        assert_eq!(prompts.matches("Add a search box").count(), 1, "{prompts}");
+        assert!(prompts.contains(words), "{prompts}");
+        assert!(feed.iter().any(|item| matches!(item, feed::FeedItem::User(user) if user.text() == "Add search" && user.pictures() == [picture.clone()])));
+        assert!(queued_request::restore(&ws, &mut RunOptions::default()).unwrap().is_none(), "a started request is no longer queued");
+        assert!(notes::take_left(&notes::notes_dir(&ws.inbox_dir()), true).is_empty());
+    }
+
+    #[test]
+    fn a_restored_queued_request_keeps_separate_waiting_notes() {
+        for version in [1, 2, 3] {
+            let b = bench();
+            let ws = worked_on(&b);
+            let picture = ws.root.join("attachments/colors.png");
+            let left = notes::Left { text: "Make the header blue".into(), shown: "Use this blue".into(), pictures: vec![picture.clone()], added: None };
+            notes::hand_over(&notes::notes_dir(&ws.inbox_dir()), 7, &left.text, Some(&left)).unwrap();
+            if version == 1 {
+                std::fs::write(ws.inbox_dir().join("queued-request.json"), r#"{"version":1,"message":"Add a search box","shown":null,"shown_pictures":[]}"#)
+                    .unwrap();
+            } else if version == 2 {
+                std::fs::write(
+                    ws.inbox_dir().join("queued-request.json"),
+                    r#"{"version":2,"message":"Add a search box","shown":null,"shown_pictures":[],"carried_notes":[]}"#,
+                )
+                .unwrap();
+            } else {
+                queued_request::save(&ws, &RunOptions { message: Some("Add a search box".into()), ..Default::default() }).unwrap();
+            }
+            // A fresh start, as after reopening the app: no request or note lives in memory.
+            let (ok, feed) = try_it(&b, &Workspace::open(&ws.root).unwrap());
+            assert!(ok);
+            let prompts = std::fs::read_to_string(&b.prompts).unwrap();
+            assert_eq!(prompts.matches("Add a search box").count(), 1, "{prompts}");
+            assert_eq!(prompts.matches(&left.text).count(), 1, "the independent waiting note must reach the builder: {prompts}");
+            assert!(feed.iter().any(|item| matches!(item, feed::FeedItem::User(user) if user.text() == left.shown && user.pictures() == [picture.clone()])));
+            assert!(queued_request::restore(&ws, &mut RunOptions::default()).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn a_restored_follow_up_keeps_a_ghidra_stop_made_after_it_was_queued() {
+        use craft_anything_engine::tools::deep;
+        let b = bench();
+        let ws = worked_on(&b);
+        let asked = std::time::UNIX_EPOCH + Duration::from_nanos(1_234_567_890);
+        queued_request::save(&ws, &RunOptions { message: Some("Keep the earlier request".into()), asked, ..Default::default() }).unwrap();
+        let root = ws.root.clone();
+        drop(ws);
+        deep::stop_for(&root).unwrap();
+        let marker = std::fs::read(root.join(deep::STOPPED)).unwrap();
+        let reopened = Workspace::open(&root).unwrap();
+        let opts = RunOptions { asked: std::time::SystemTime::now() + Duration::from_secs(1), ..Default::default() };
+
+        let (ok, _) = try_with(&b, &reopened, opts);
+
+        assert!(ok);
+        assert!(deep::stopped(&root), "the real worker must not mistake a restored request for one made after the stop");
+        assert_eq!(std::fs::read(root.join(deep::STOPPED)).unwrap(), marker);
+        assert!(std::fs::read_to_string(&b.prompts).unwrap().contains("Keep the earlier request"));
+        assert!(queued_request::restore(&reopened, &mut RunOptions::default()).unwrap().is_none());
+    }
+
     /// #91: with the helper missing, the build stops before studying or asking the agent, and
     /// says why.
     #[test]
