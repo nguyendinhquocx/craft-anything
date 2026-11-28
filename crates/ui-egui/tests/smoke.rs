@@ -19,6 +19,45 @@ fn harness_sized(size: egui::Vec2, make: impl FnOnce() -> CraftApp + 'static) ->
     })
 }
 
+fn painted_draft(h: &Harness<'static, CraftApp>, draft: &str) -> (egui::Rect, egui::Rect) {
+    h.output()
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == draft => Some((text.galley.rect.translate(text.pos.to_vec2()), shape.clip_rect)),
+            _ => None,
+        })
+        .expect("the draft is painted")
+}
+
+#[test]
+fn make_and_ask_show_more_of_a_long_draft_in_a_taller_window() {
+    let draft = ["A line of the draft."; 60].join("\n");
+    for ask in [false, true] {
+        let visible_height = |height| {
+            let text = draft.clone();
+            let mut h = harness_sized(egui::vec2(1280.0, height), move || {
+                let mut app = demo::app(demo::engine(Mode::Beginner, true));
+                if ask {
+                    demo::fill_ask(&mut app);
+                    app.state.input = text.clone();
+                } else {
+                    app.state.screen = Screen::Home;
+                    app.state.make.request = text.clone();
+                }
+                app
+            });
+            h.run_steps(6);
+            let (text, viewport) = painted_draft(&h, &draft);
+            assert!(text.height() > viewport.height(), "the long draft scrolls within the editor");
+            viewport.height()
+        };
+        let shorter = visible_height(950.0);
+        let taller = visible_height(1450.0);
+        assert!(taller > shorter + 100.0, "a taller window shows more of the draft: {shorter} then {taller}, Ask={ask}");
+    }
+}
+
 /// Step until `done` holds (workers run on threads), or give up after a few seconds.
 fn wait(h: &mut Harness<'static, CraftApp>, done: impl Fn(&CraftApp) -> bool) -> bool {
     let start = Instant::now();
@@ -826,7 +865,7 @@ fn the_builders_questions_can_come_to_the_person_for_one_project() {
 fn the_approvals_link_is_clear_of_send() {
     use craft_anything_engine::workspace::{TargetRef, Workspace};
     // The smallest window the app allows, a normal one, and that at the highest zoom (640 points
-    // wide, so the switches take two rows). The smallest at 200% leaves the row below the window.
+    // wide, so the switches take two rows). The smallest at 200% has its own test below.
     for (size, zoom) in [((760.0, 520.0), 1.0), ((1280.0, 820.0), 1.0), ((1280.0, 820.0), 2.0)] {
         let d = tempfile::tempdir().unwrap();
         let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
@@ -844,6 +883,11 @@ fn the_approvals_link_is_clear_of_send() {
         // Not under Send or near it: a clear gap between them across the row.
         let gap = (send.left() - approvals.right()).max(approvals.left() - send.right());
         assert!(gap >= 48.0, "Approvals is {gap} pt from Send, {case}");
+        // The whole composer fits its own viewport, so its bottom row isn't clipped.
+        let clip = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("project-composer-clip"))).expect("the composer viewport was recorded");
+        let content = h.ctx.data(|d| d.get_temp::<f32>(egui::Id::new("project-composer-content"))).expect("the composer content height was recorded");
+        assert!(content <= clip.height() + 0.5, "composer content {content} is clipped by {clip:?}, {case}");
+        assert!(clip.contains_rect(approvals), "Approvals {approvals:?} is outside the composer viewport {clip:?}, {case}");
         // The prompt box and the row under it hold still over several frames.
         for _ in 0..6 {
             h.run_steps(1);
@@ -858,6 +902,44 @@ fn the_approvals_link_is_clear_of_send() {
         } else {
             h.get_by_label("Approvals").click();
         }
+        h.run_steps(2);
+        assert!(egui::Popup::is_id_open(&h.ctx, egui::Id::new("project-approvals")), "the menu opened, {case}");
+    }
+}
+
+/// The smallest window at the highest zoom is 380 x 260 points. The row under the project's prompt
+/// box used to be drawn below it, out of reach, and a longer prompt pushed it further down.
+#[test]
+fn the_project_row_under_the_prompt_box_stays_reachable_at_200_percent() {
+    use craft_anything_engine::workspace::{TargetRef, Workspace};
+    for lines in [1, 8] {
+        let d = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(d.path(), "Notes", "A notes app", TargetRef::None).unwrap();
+        let mut h = harness_sized(egui::vec2(760.0, 520.0), move || {
+            let mut a = demo::app(demo::engine(Mode::Beginner, true));
+            a.workspace = Some(ws);
+            a.state.screen = Screen::Project;
+            a.state.project_input = "a line of text\n".repeat(lines);
+            a
+        });
+        h.ctx.set_zoom_factor(2.0);
+        h.run_steps(6);
+        let viewport = h.ctx.content_rect();
+        let case = format!("{lines} line(s) at 760 x 520 and 200%");
+        let feed = h.ctx.data(|d| d.get_temp::<f32>(egui::Id::new("project-feed-height"))).expect("the feed viewport was recorded");
+        let clip = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("project-composer-clip"))).expect("the composer viewport was recorded");
+        assert!(feed >= 60.0, "the feed viewport is only {feed} points tall, {case}");
+        for label in ["Send (Enter)", "Approvals", "Change it", "Just ask"] {
+            let rect = h.get_by_label(label).rect();
+            if !clip.contains_rect(rect) {
+                h.get_by_label(label).scroll_to_me();
+                h.run_steps(3);
+            }
+            let rect = h.get_by_label(label).rect();
+            assert!(clip.contains_rect(rect), "{label} at {rect:?} is outside the composer {clip:?}, {case}");
+            assert!(viewport.contains_rect(rect), "{label} at {rect:?} is outside {viewport:?}, {case}");
+        }
+        h.get_by_label("Approvals").click();
         h.run_steps(2);
         assert!(egui::Popup::is_id_open(&h.ctx, egui::Id::new("project-approvals")), "the menu opened, {case}");
     }
@@ -1683,17 +1765,25 @@ fn the_agent_console_prompt_box_starts_tall_and_grows_inside_the_window() {
     assert!(empty >= 50.0, "room for three lines, got {empty}");
     let hint = "Enter to send · Shift+Enter for a new line";
 
-    // Eight lines fit: the field isn't scrolled, so its rect is what's on screen.
-    h.state_mut().state.input = ["a line"; 8].join("\n");
+    // Four lines fit before the compact console starts scrolling.
+    h.state_mut().state.input = ["a line"; 4].join("\n");
     h.run_steps(6);
-    let field = h.get_by_label("Ask a question").rect();
+    let (field, four_lines) = painted_draft(&h, &h.state().state.input);
+    let four_line_height = field.height();
     let (tabs, below) = (h.get_by_label("Agent").rect(), h.get_by_label(hint).rect());
-    assert!(field.height() > empty * 2.0, "it grows as lines are added: {} after {empty}", field.height());
-    assert!(field.top() >= tabs.bottom() && field.bottom() <= below.top(), "all eight lines show: tabs={tabs:?}, field={field:?}, hint={below:?}");
+    assert!(field.height() > empty, "it grows as lines are added: {} after {empty}", field.height());
+    assert!(four_lines.contains_rect(field), "all four lines show: {field:?} inside {four_lines:?}");
+    assert!(field.top() >= tabs.bottom() && field.bottom() <= below.top(), "the field stays between the tabs and send row");
 
     // Past what fits it scrolls, and the console settles with its tabs and send row in the window.
     h.state_mut().state.input = ["a line"; 60].join("\n");
     h.run_steps(6);
+    let (field, long_draft) = painted_draft(&h, &h.state().state.input);
+    assert!(field.height() > long_draft.height(), "the long draft scrolls");
+    assert!(
+        (four_line_height..four_line_height * 1.125).contains(&long_draft.height()),
+        "four lines plus padding fit, while a fifth line needs scrolling: {four_line_height} of text, {long_draft:?}"
+    );
     let (tabs, below) = (h.get_by_label("Agent").rect(), h.get_by_label(hint).rect());
     h.run_steps(20);
     assert_eq!(h.get_by_label("Agent").rect(), tabs, "the console settles");
@@ -2820,8 +2910,13 @@ fn the_prompt_box_is_laid_out_with_its_new_height_in_the_frame_it_grows() {
     h.run_steps(2);
     h.state_mut().open_workspace(a);
     h.run_steps(3);
-    let bottom = |h: &Harness<'static, CraftApp>| h.get_by_label("Ask for a change").rect().max.y;
-    let before = bottom(&h);
+    let field = |h: &Harness<'static, CraftApp>| h.get_by_label("Ask for a change").rect();
+    let bottom = |h: &Harness<'static, CraftApp>| field(h).bottom();
+    let draft_rects = |h: &Harness<'static, CraftApp>| painted_draft(h, &h.state().state.project_input);
+    let send_bottom = |h: &Harness<'static, CraftApp>| h.get_by_label("Send (Enter)").rect().bottom();
+    let compact = field(&h);
+    let before = compact.bottom();
+    let before_send = send_bottom(&h);
     // Five more lines at once: the very next frame shown already has the taller box in place,
     // not one laid out with last frame's height (which pushed it off the bottom, then back).
     h.state_mut().state.project_input = "one
@@ -2833,9 +2928,40 @@ six"
     .into();
     h.step();
     let after = bottom(&h);
+    let (draft, clip) = draft_rects(&h);
+    assert!(draft.top() >= clip.top() && draft.bottom() <= clip.bottom(), "all six lines should be visible: draft {draft:?}, clip {clip:?}");
     h.run_steps(3);
     assert!((after - bottom(&h)).abs() < 0.5, "the box didn't move after the frame it grew in: {after} then {}", bottom(&h));
     assert!((after - before).abs() < 0.5, "it grows upwards, keeping its bottom edge: {before} then {after}");
+
+    h.state_mut().state.project_input = "A long prompt wraps without hard line breaks. ".repeat(100);
+    h.run_steps(3);
+    let (draft, clip) = draft_rects(&h);
+    assert!(draft.height() > clip.height() && clip.height() > 180.0, "soft wraps fill the box and scroll at the cap: draft {draft:?}, clip {clip:?}");
+    assert!((send_bottom(&h) - before_send).abs() < 0.5, "overflow leaves Send in place");
+
+    h.state_mut().state.project_input.clear();
+    h.run_steps(3);
+    assert!((field(&h).height() - compact.height()).abs() < 0.5, "clearing restores the compact box");
+}
+
+#[test]
+fn a_long_draft_leaves_send_visible_below_the_plan_in_a_short_window() {
+    use craft_anything_ui_egui::state::{FeedItem, PlanStatus, PlanStep};
+    let mut h = harness_sized(egui::vec2(760.0, 650.0), || {
+        let mut app = demo::app(demo::engine(Mode::Beginner, true));
+        demo::fill_project(&mut app);
+        let steps = (1..=40).map(|n| PlanStep { text: format!("Step {n}"), doing: String::new(), status: PlanStatus::Todo }).collect();
+        app.state.feed.push(FeedItem::Plan(steps));
+        app
+    });
+    h.run_steps(6);
+    let before = h.get_by_label("Send (Enter)").rect();
+    assert!(before.bottom() <= 650.0, "Send starts in the window: {before:?}");
+    h.state_mut().state.project_input = ["A long draft in a short pane."; 60].join("\n");
+    h.run_steps(6);
+    let after = h.get_by_label("Send (Enter)").rect();
+    assert!(after.bottom() <= 650.0, "Send stays in the window: {after:?}");
 }
 
 #[test]
@@ -2998,6 +3124,34 @@ fn a_big_cost_doesnt_paint_over_its_caption() {
     let caption = h.get_by_label("AI cost (estimate)").rect();
     let value = h.get_by_label("about $13021.36").rect();
     assert!(!caption.intersects(value), "{caption:?} and {value:?}");
+}
+
+/// R5.3: an unreadable usage record stops every count; the project says so and sets it aside.
+#[test]
+fn an_unreadable_usage_record_is_set_aside_from_the_project_and_counted_again() {
+    use craft_anything_engine::workspace::{TargetRef, USAGE_FILE, USAGE_SET_ASIDE, Workspace};
+    let d = tempfile::tempdir().unwrap();
+    // A real project folder: the tool opens it.
+    let root = Workspace::create(d.path(), "Snake", "A snake game", TargetRef::None).unwrap().root;
+    std::fs::write(root.join(USAGE_FILE), b"{ not json").unwrap();
+    let r = root.clone();
+    let mut h = harness(move || {
+        let mut a = demo::app(demo::engine(Mode::Beginner, true));
+        demo::fill_project(&mut a);
+        if let Some(ws) = a.workspace.as_mut() {
+            ws.root = r.clone();
+        }
+        a
+    });
+    h.run_steps(3);
+    h.get_by_label("Builds aren't counted while this record can't be read.");
+    h.get_by_label("Set it aside and count again").click();
+    assert!(wait(&mut h, |a| a.usage.get(&root).is_some_and(|u| !u.unreadable)));
+    assert_eq!(std::fs::read(root.join(USAGE_SET_ASIDE)).unwrap(), b"{ not json");
+    h.run_steps(2);
+    assert!(h.query_by_label("Set it aside and count again").is_none());
+    h.get_by_label("Time spent");
+    assert!(h.get_all_by_label("Unknown").count() >= 2, "what came before isn't known");
 }
 
 #[test]

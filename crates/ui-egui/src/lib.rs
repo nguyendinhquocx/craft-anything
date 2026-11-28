@@ -181,7 +181,8 @@ pub enum Done {
     },
     AgentModelChoices {
         request: u64,
-        context: craft_anything_ai::ModelContext,
+        // Boxed: a model context is far larger than the other variants (clippy::large_enum_variant on Windows).
+        context: Box<craft_anything_ai::ModelContext>,
         result: Result<Vec<craft_anything_ai::AgentModel>, ToolError>,
     },
     ModelTuning {
@@ -1147,6 +1148,7 @@ impl CraftApp {
             ("project_play", Ok(_)) => self.toast(tr("Starting… it opens in its own window."), false),
             ("project_play", Err(e)) => self.toast(format!("{} {}", tr("Couldn't start it."), e.for_people()), true),
             ("project_assets_budget" | "project_assets_allow", Ok(_)) => self.assets_changed(),
+            (craft_anything_engine::tools::project_tools::USAGE_RESET_TOOL, r) => self.usage_reset(r),
             ("rebuild_question_ask", r) => self.question_done(r),
             ("project_build_finish", Ok(v)) => {
                 if let Some(ws) = self.workspace.as_mut().filter(|w| v["project"].as_str().is_some_and(|p| w.root == std::path::Path::new(p))) {
@@ -1875,7 +1877,7 @@ impl CraftApp {
             Done::AgentModelChoices { request, context, result } => {
                 // Keep a matching result even while the engine is busy. Settings invalidates
                 // changed contexts once it can read the session again; saving rechecks too.
-                if let Some(picker) = self.agent_model_picker.as_mut().filter(|p| p.request == request && p.context == context) {
+                if let Some(picker) = self.agent_model_picker.as_mut().filter(|p| p.request == request && p.context == *context) {
                     picker.result = Some(result.map_err(|e| e.for_people()));
                 }
             }

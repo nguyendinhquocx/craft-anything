@@ -527,12 +527,12 @@ pub fn build_args(
     resume: Option<&str>,
     access: Access,
 ) -> Vec<String> {
-    args_for(adapter, opts, prompt, preamble, mcp, resume, access, None)
+    args_for(adapter, opts, prompt, preamble, mcp, resume, access, None, None)
 }
 
 /// [`build_args`], with the message already written to `message_file` for an adapter that
 /// [reads it there](AgentAdapter::reads_message_file).
-#[expect(clippy::too_many_arguments, reason = "build_args' inputs and the file")]
+#[expect(clippy::too_many_arguments, reason = "build_args' inputs, the message file and the run's folder")]
 fn args_for(
     adapter: &dyn AgentAdapter,
     opts: &BackendOptions,
@@ -542,13 +542,14 @@ fn args_for(
     resume: Option<&str>,
     access: Access,
     message_file: Option<&Path>,
+    run_dir: Option<&Path>,
 ) -> Vec<String> {
     // A leading dash would be read as a flag.
     let prompt = if prompt.starts_with('-') { format!(" {prompt}") } else { prompt.to_string() };
     let builder = matches!(access, Access::Build | Access::CleanRoomBuild);
     let question = matches!(access, Access::Question | Access::CleanRoomQuestion);
     let reads_checked = matches!(access, Access::CleanRoomBuild | Access::CleanRoomQuestion | Access::CleanRoomAnalyse);
-    adapter.args(&ArgsCx { options: opts, prompt: &prompt, preamble, mcp, resume, builder, reads_checked, question, message_file })
+    adapter.args(&ArgsCx { options: opts, prompt: &prompt, preamble, mcp, resume, builder, reads_checked, question, message_file, run_dir })
 }
 
 /// The message written to a private file for one run, removed when the run is over.
@@ -575,6 +576,53 @@ impl Drop for MessageFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// A folder of one run's own for the files it writes — a tool server's config, an overlay carrying
+/// the chosen model — deleted when the run is over, a stopped run included. A tool server's config
+/// may hold a key inline, and copies of a key must not pile up in the temporary folder; private is
+/// not the same as gone.
+struct RunDir(PathBuf);
+
+impl RunDir {
+    /// None when the folder can't be made: the run then writes no files, as some adapters already
+    /// do without one, rather than writing them somewhere they would stay.
+    fn make() -> Option<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("craft-anything-run-{}-{n}", std::process::id()));
+        // `create_dir` refuses a path that is already there, so a folder prepared beforehand is
+        // never written through.
+        match private_dir().create(&dir) {
+            Ok(()) => Some(Self(dir)),
+            Err(e) => {
+                log::warn!("couldn't make a folder for this run's files, so it writes none: {}", dir.display());
+                let _ = e;
+                None
+            }
+        }
+    }
+}
+
+impl Drop for RunDir {
+    fn drop(&mut self) {
+        // The whole folder: an adapter writes one or two files inside it, and nothing else may.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A builder for one run's folder, owner-only from the moment it exists.
+#[cfg(unix)]
+fn private_dir() -> std::fs::DirBuilder {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+}
+
+#[cfg(not(unix))]
+fn private_dir() -> std::fs::DirBuilder {
+    std::fs::DirBuilder::new()
 }
 
 /// What a run may do with files: a question reads only, a builder builds, anything else analyses;
@@ -1108,6 +1156,9 @@ fn agent_env(builder: bool, effort: Option<crate::model::Effort>) -> Vec<(&'stat
         ("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", if builder { "0" } else { "120000" }.into()),
         ("BASH_DEFAULT_TIMEOUT_MS", ms(shell / 2)),
         ("BASH_MAX_TIMEOUT_MS", ms(shell)),
+        // After its last turn `claude -p` waits for the background subagents it started, but stops
+        // them after 10 quiet minutes by default (#2428); a builder's may work for hours.
+        ("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", ms(shell)),
         // High effort for Claude Code unless chosen. An environment variable rather than
         // `--effort`: it ranks highest, and an older Claude Code that doesn't know it ignores it.
         ("CLAUDE_CODE_EFFORT_LEVEL", crate::prompt::choose_effort(effort).as_str().into()),
@@ -1273,8 +1324,21 @@ fn run_cli(spec: &CliSpec, text: &str, retry: bool, tx: &Sender<AgentEvent>, sto
     // Kept until the run is over; over SSH the file would be on the wrong computer.
     let message_file =
         (remote.is_none() && adapter.reads_message_file()).then(|| MessageFile::write(&std::env::temp_dir(), &format!("{preamble}{text}"))).flatten();
+    // Files this run writes are kept here and removed with it, over SSH too: an adapter that writes
+    // them writes them where the agent runs, and the folder's name is what the run is given.
+    let run_dir = adapter.run_files().then(RunDir::make).flatten();
     let resume_arg = if adapter.resumes() { resume.as_deref() } else { None };
-    let args = args_for(adapter.as_ref(), &spec.options, text, &preamble, &mcp, resume_arg, access, message_file.as_ref().map(|f| f.0.as_path()));
+    let args = args_for(
+        adapter.as_ref(),
+        &spec.options,
+        text,
+        &preamble,
+        &mcp,
+        resume_arg,
+        access,
+        message_file.as_ref().map(|f| f.0.as_path()),
+        run_dir.as_ref().map(|d| d.0.as_path()),
+    );
     let shown = FailureContext::new(&program, &args, text, remote.as_deref(), spec);
     // A builder turn may take hours and sit silent for long stretches: Ghidra's first look at a big
     // game, an engine build, or the person answering a question. Claude Code's own limits are
@@ -2494,6 +2558,9 @@ mod tests {
             assert!(tools.split(',').any(|tool| tool == "Write"), "{access:?}: {tools}");
             // #1105: a Deep builder can start subagents; Clean room keeps them out.
             assert_eq!(tools.split(',').any(|tool| tool == "Agent"), access == Access::Build, "{access:?}: {tools}");
+            // #2428: and is told how to wait for them, which a builder without them isn't.
+            let prompt = &builder[builder.iter().position(|x| x == "--append-system-prompt").unwrap() + 1];
+            assert_eq!(prompt.starts_with("PRE") && prompt.contains("notification"), access == Access::Build, "{access:?}: {prompt}");
         }
         assert_eq!(a[pos("--resume") + 1], "sess-1");
         assert_eq!(a[pos("--allowedTools") + 1], "mcp__craft-anything__*");
